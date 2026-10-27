@@ -1,0 +1,20 @@
+# Direct dependencies (human-edited). The full pinned set is requirements.txt.
+# Update procedure: README -> "Updating dependencies".
+numpy
+scipy
+sounddevice
+faster-whisper
+openwakeword     # installed with --no-deps: it hard-requires tflite-runtime on Linux, which we don't use
+scikit-learn     # openwakeword runtime deps, listed explicitly because of --no-deps
+tqdm
+requests
+kokoro-onnx      # default voice
+piper-tts        # fast fallback voice
+onnxruntime
+httpx
+sherpa-onnx      # speaker recognition (TitaNet embeddings)
+cryptography     # AES-GCM for data at rest
+keyring          # data key lives in the system keyring (Secret Service)
+pyyaml
+psutil
+pytest

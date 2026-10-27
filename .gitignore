@@ -1,0 +1,38 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Models (downloaded by scripts/download_models.py; large and reproducible)
+models/
+
+# Orion data: never commit personal data, transcripts, audio, or logs
+data/
+logs/
+inbox/
+backups/
+*.db
+*.db-*
+*.sqlite*
+*.jsonl
+*.wav
+*.flac
+*.mp3
+
+# Secrets and tokens
+.env
+.env.*
+*.key
+*.pem
+*token*cache*
+*.msal*
+secrets*.yaml
+config.local.yaml
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+voice-samples/

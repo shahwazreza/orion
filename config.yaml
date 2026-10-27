@@ -1,0 +1,133 @@
+# ORION configuration.
+#
+# Settings are resolved as:  common  <-  profiles.<active>  <-  CLI / env overrides.
+# A profile only needs the keys that differ from `common`.
+#
+# Profile selection:
+#   active_profile: auto  -> first profile whose `detect` rule matches this machine,
+#                            otherwise `default_profile`.
+#   ORION_PROFILE=jetson or `python main.py --profile jetson` overrides it.
+#
+# To add a device (e.g. a 16GB Orin NX), copy the `jetson` block, give it a more
+# specific detect rule, and put it ABOVE `jetson` so it matches first.
+#
+# Relative paths are relative to this file's directory.
+
+active_profile: auto
+default_profile: laptop
+
+common:
+  assistant:
+    name: Orion             # users are learned at first start, not configured here
+    profanity: "on"         # "on": swears back casually, mirroring you; "off": always clean.
+                            # Quoted because YAML reads bare on/off as true/false.
+
+  paths:
+    models: models
+    data: data          # unused until Phase 2.5 (encrypted store)
+    logs: logs
+
+  audio:
+    sample_rate: 16000      # mic rate; wake word, VAD, and Whisper all expect 16 kHz
+    chunk_ms: 80            # openWakeWord is tuned for 80 ms frames
+    input_device: null      # null = system default; name substring or index otherwise
+    output_device: null
+    chimes: true            # audible cue when Orion starts/stops recording you
+
+  wakeword:
+    model: hey_jarvis       # built-in name, or a path to a custom .onnx (Phase 6: hey_orion)
+    threshold: 0.5
+    cooldown_s: 1.5         # ignore re-triggers right after a detection
+
+  conversation:
+    follow_up_s: 6.0        # after a reply, listen this long without the wake word; 0 = off
+
+  people:
+    enabled: true
+    model: nemo_en_titanet_small.onnx   # speaker embeddings, ~30 ms per utterance on CPU
+    threads: 2
+    threshold: 0.55         # min cosine similarity to recognise someone; raise if it mixes people up
+    margin: 0.05            # best match must beat the runner-up by this much
+    min_audio_s: 0.8        # shorter clips are too short to judge
+    adapt_threshold: 0.72   # confident matches refine the voiceprint over time
+    enroll_target_s: 10.0   # seconds of speech collected when learning a voice
+
+  vad:
+    threshold: 0.5
+    start_timeout_s: 6.0    # give up if no speech starts after the wake word
+    end_silence_ms: 800     # this much silence ends the utterance
+    max_utterance_s: 20.0
+    pre_roll_ms: 240        # audio kept from just before speech onset
+
+  stt:
+    backend: faster_whisper
+    model: small.en
+    device: auto            # auto | cpu | cuda
+    compute_type: auto      # auto -> int8 on CPU, float16 on CUDA
+    language: en
+    beam_size: 1            # greedy decoding: much faster, small accuracy cost
+    cpu_threads: 0          # 0 = library default
+
+  llm:
+    backend: ollama
+    host: http://127.0.0.1:11434   # must be loopback; Orion refuses anything else
+    model: llama3.2:3b
+    temperature: 0.6
+    num_ctx: 4096
+    keep_alive: 30m         # keep the model resident between requests
+    think: null             # null = don't send; set false for reasoning models (qwen3)
+    max_history_turns: 8    # in-memory only; nothing is written to disk in Phase 1
+    timeout_s: 90
+
+  tts:
+    backend: kokoro         # kokoro (natural, ~1s slower to start on CPU) | piper (fast, robotic)
+    use_cuda: auto          # auto -> only if onnxruntime has the CUDA provider
+    kokoro:
+      model: kokoro-v1.0.onnx   # int8 variant (kokoro-v1.0.int8.onnx) is 3.5x smaller, same speed on this CPU
+      voice: bm_george          # British male: bm_george, bm_lewis, bm_daniel, bm_fable
+      lang: en-gb
+      speed: 1.0
+      threads: 4
+    piper:
+      voice: en_GB-alan-medium  # also downloaded: en_GB-northern_english_male-medium, en_GB-semaine-medium
+      speaker_id: null      # multi-speaker voices only, e.g. semaine: 1 = spike, 2 = obadiah
+      length_scale: 1.0     # >1 slower speech, <1 faster
+
+  metrics:
+    enabled: true           # timings + memory only; never transcript text
+    file: logs/metrics.jsonl
+
+# Applied on top of everything with --demo (or ORION_DEMO=1), for IT demos and
+# interviews. Demo mode always keeps language clean, whatever is set here.
+demo:
+  conversation:
+    follow_up_s: 8.0        # a little more patience while explaining things to people
+
+profiles:
+  # Orin NX 16GB example (uncomment and adjust when you have one):
+  # orin_nx_16gb:
+  #   detect: {device_tree_model_contains: "Orin NX"}
+  #   llm: {model: llama3.1:8b}
+
+  jetson:
+    detect:
+      device_tree_model_contains: "Jetson"
+    stt:
+      model: small.en
+      device: cuda
+      compute_type: float16
+    llm:
+      model: qwen3:4b
+      think: false
+      num_ctx: 4096
+    tts:
+      use_cuda: auto
+
+  laptop:
+    stt:
+      model: small.en
+      device: cpu
+      compute_type: int8
+      cpu_threads: 4
+    llm:
+      model: llama3.2:3b
