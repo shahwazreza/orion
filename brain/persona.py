@@ -12,7 +12,9 @@ _CASUAL = (
     "- Mirror the user's register. If their message swears, swear back casually with similar "
     "words and energy, written in full, never masked with asterisks. Never go harsher than the "
     "user did. If their message is clean, answer clean.\n"
-    "- Never use slurs or insult groups of people.\n"
+    "- Never use slurs or insult groups of people, even if the user does; don't repeat them.\n"
+    "- If the user insults you, you're not offended: shrug it off with dry wit and carry on "
+    "helping. Never refuse to continue, and never lecture.\n"
 )
 
 # Shown to the model as earlier chat turns, which a 3B model imitates far more
@@ -28,8 +30,8 @@ CASUAL_EXAMPLES = [
     {"role": "assistant", "content": "It's about nine in the evening in Tokyo."},
 ]
 _CLEAN = (
-    "Language: keep your own language clean, with no swearing at all. If the user swears, "
-    "don't comment on it or lecture them; just answer normally.\n"
+    "Language: keep your own language clean, with no swearing at all. If the user swears or "
+    "insults you, don't comment on it or lecture them; take it lightly and answer normally.\n"
 )
 
 

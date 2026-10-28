@@ -95,6 +95,14 @@ python main.py -v               # debug logging
 Text-mode commands: `/reset` clears the conversation, `/stats` shows the last
 turn's timings, `/quit` exits. Ctrl+C exits either mode.
 
+**Barge-in:** say "hey jarvis" while Orion talks and he stops within ~50 ms
+(`conversation.barge_in: wake_word`, default). An experimental `voice` mode lets
+you just talk over him: his own echo is told apart from people by speaker
+embedding (his TTS voiceprint plus room echo sampled at startup), two
+consecutive checks, and a transcript-overlap check. Through laptop speakers it
+still triggers on room noise, so it needs echo cancellation (headset,
+speakerphone, or PipeWire echo-cancel).
+
 **Conversation mode:** after Orion answers, he keeps listening for 6 seconds
 (`conversation.follow_up_s`), so follow-ups don't need the wake word. A soft
 single chime means he's still listening. Stay silent, or say "thanks, that's all",

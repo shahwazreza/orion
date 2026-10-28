@@ -144,7 +144,7 @@ and walks you through a short setup. Nothing needs configuring beforehand.
 4. He asks a few casual questions (your day, a favourite meal, a place you'd
    like to visit). Answer each in a sentence or two, in your normal voice.
    He needs about 10 seconds of speech in total, usually 2 or 3 answers. If an
-   answer is very short ("Biryani."), he asks you to say a bit more.
+   answer is very short ("Pizza."), he asks you to say a bit more.
 5. *"Got it, Reza. I'll recognise your voice from now on."*
 
 He keeps a mathematical voice signature, not recordings, and your answers to
@@ -184,6 +184,24 @@ can read.
 The microphone is always on, listening for the wake word, but nothing is
 recorded or transcribed until the rising chime.
 
+### Interrupting Orion
+
+`conversation.barge_in` in `config.yaml` controls this:
+
+| Setting | What interrupts him |
+|---|---|
+| `wake_word` (default) | "Hey jarvis" |
+| `voice` | Anyone talking over him, or "hey jarvis". What you say becomes your next request. Needs echo cancellation (below) |
+| `off` | Nothing; he always finishes |
+
+In `voice` mode his microphone also hears his own voice from the speakers. He
+compares what he hears with his own voice (his TTS voice plus his room echo,
+sampled while he says "Orion online." at startup), requires two checks in a
+row, and drops interruptions whose words match what he just said. Through
+laptop speakers that still isn't enough: in testing, room sounds and dips in
+his echo made him stop at random. Use `voice` only with a headset, a
+speakerphone with built-in echo cancellation, or PipeWire's echo-cancel module.
+
 ### Ending a conversation
 
 Any of these end it, with or without "thanks" or "Orion" around them:
@@ -200,7 +218,8 @@ or just "thanks" / "thank you" on its own.
   mid-sentence, see section 17.
 - He waits up to 6 seconds for you to start talking after the wake word, and
   records at most 20 seconds in one go.
-- You can't interrupt him while he's talking yet. Let him finish, then speak.
+- **You can interrupt him:** say **"hey jarvis"** while he's talking. He stops
+  within a moment and listens. See [Interrupting Orion](#interrupting-orion).
 - Answers are short on purpose (one to three sentences). Ask for more detail
   if you want it.
 
@@ -222,6 +241,7 @@ These phrases are handled directly instead, and behave the same every time.
 | "Learn *Joe*'s voice" | Teaches Orion someone else's voice (owner only) |
 | "Learn my voice" / "Relearn my voice" | Records a fresh voice signature |
 | "Delete my profile" / "Forget me" | Deletes your name and voice, after confirming |
+| "Delete *Joe*" | Deletes someone else, after confirming (owner only) |
 
 ### Language
 
@@ -306,8 +326,11 @@ nearby. Joe can't ask for it himself, because Orion can't recognise him yet.
 
 ### Changing or removing people
 
-- By voice: "call me ...", "relearn my voice", "delete my profile" (each person
-  can only change or delete themselves).
+- By voice: "call me ...", "relearn my voice", "delete my profile" change or
+  delete yourself. The owner can also say "delete *Joe*" or "learn *Joe*'s voice".
+- If you add someone Orion already knows by name but has never heard (for
+  example, their voice learning didn't finish), he recognises the name and just
+  learns their voice, instead of creating a duplicate.
 - From the terminal (any person): see section 13.
 - If the owner is deleted, the next person Orion met becomes owner.
 
@@ -655,7 +678,8 @@ gets noted. Later phases add real data sources and fine-tuning.
 
 - The wake word is **"hey jarvis"** until Phase 6.
 - **No spoken shutdown yet.** Use Ctrl+C. "Orion, shut down" and the wipe arrive in Phase 2.5.
-- **You can't interrupt him** while he's speaking.
+- **Interrupting by just talking** (`barge_in: voice`) isn't reliable through
+  laptop speakers yet, so the default is "hey jarvis" to interrupt.
 - **English only.**
 - **No memory between restarts** except who people are. "Remember that..." arrives in Phase 2.
 - **The small model can be wrong** or invent details. Don't rely on it for facts

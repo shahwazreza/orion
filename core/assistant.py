@@ -7,6 +7,7 @@ import re
 
 from audio.tts import Speaker
 from brain.llm import Conversation, LLMBackend, LLMError
+from brain.capabilities import unsupported
 from brain.persona import CASUAL_EXAMPLES, system_prompt
 from brain.profanity import ProfanityPolicy, scrub
 from brain.speech_text import SentenceChunker
@@ -67,6 +68,18 @@ class Assistant:
         Returns the reply text, or None if the model failed (Orion says why).
         """
         conversation = self.conversation_for(user)
+        refusal = unsupported(user_text)
+        if refusal is not None:
+            # Needs live or personal data Orion doesn't have: never let the model guess.
+            self.speaker.begin(on_first_audio=lambda: turn.mark("first_audio"))
+            self._say(refusal)
+            self.speaker.wait()
+            conversation.commit(user_text, refusal)
+            turn.extra["ok"] = True
+            turn.extra["capability_guard"] = True
+            turn.mark("done")
+            self.last_metrics = self.metrics.record(turn, self.profile)
+            return refusal
         # Backstop: small models sometimes swear anyway (e.g. echoing earlier chat).
         clean = (lambda s: s) if self.may_swear(user) else scrub
         turn.mark("speech_end")  # no-op if the voice loop already marked it
@@ -77,12 +90,18 @@ class Assistant:
         turn.mark("llm_start")
         try:
             for piece in self.llm.stream_chat(conversation.messages_with(user_text)):
+                if self.speaker.interrupted:
+                    # Barge-in: stop generating. Leaving the loop closes the HTTP
+                    # stream, which tells Ollama to stop too.
+                    turn.extra["interrupted"] = True
+                    break
                 turn.mark("llm_first_token")
                 reply_parts.append(piece)
                 for sentence in chunker.feed(piece):
                     self._say(clean(sentence))
-            for sentence in chunker.flush():
-                self._say(clean(sentence))
+            if not self.speaker.interrupted:
+                for sentence in chunker.flush():
+                    self._say(clean(sentence))
             turn.mark("llm_done")
         except LLMError as exc:
             log.warning("LLM failure: %s", exc)

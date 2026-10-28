@@ -39,7 +39,12 @@ _NAME_LEAD = re.compile(
 _NAME_ANYWHERE = re.compile(r"\b(?:my name is|my name's|the name's|the name is|call me|i'm|i am)\s+",
                             re.I)
 _NOT_NAMES = {"yes", "no", "yeah", "nope", "okay", "ok", "hello", "hi", "hey", "thanks", "thank",
-              "you", "sorry", "what", "nothing", "orion", "jarvis", "the", "a", "an"}
+              "you", "sorry", "what", "nothing", "orion", "jarvis", "the", "a", "an",
+              "bye", "goodbye", "cya", "later", "stop", "cancel", "never", "mind", "nevermind",
+              "quit", "exit", "skip", "wait", "hmm", "um", "uh", "great", "cool", "fine", "good"}
+# Said instead of a name: the person doesn't want to do introductions now.
+_CANCEL_INTRO = re.compile(r"^\W*(bye|goodbye|stop|cancel|never ?mind|forget it|not now|"
+                           r"no thanks|skip( it)?|later|quit)\W*$", re.I)
 
 
 def extract_name(text: str) -> str | None:
@@ -69,6 +74,7 @@ class People:
         self.enroll_target_s = enroll_target_s
         self.min_answer_s = min_answer_s
         self.duplicate_voice_score = duplicate_voice_score
+        self._returning: User | None = None   # set when a "new" person is a voiceless existing one
 
     # ---- onboarding -------------------------------------------------------
     def greet_on_start(self, dialog: Dialog) -> None:
@@ -99,8 +105,15 @@ class People:
         name = self._ask_name(dialog, "What's your name?" if first else "Hello. What's your name?",
                               candidate=heard_name)
         if name is None:
+            self._returning = None
             dialog.say("No problem. We can do introductions another time.")
             return None
+        returning, self._returning = self._returning, None
+        if returning is not None:
+            dialog.say(f"Ah, {returning.name}, we've met. I just don't know your voice yet.")
+            if dialog.hears_voice:
+                self.enroll_voice(dialog, returning)
+            return returning
         user = self.store.add(name)
         if dialog.hears_voice:
             self.offer_voice(dialog, user, intro=None)
@@ -127,11 +140,18 @@ class People:
                 # name Orion already suggested, not giving a new one.
                 if last and (last.lower() in heard.text.lower() or yes_no(heard.text) is True):
                     return last
+                if _CANCEL_INTRO.match(heard.text):
+                    return None
                 name = extract_name(heard.text)
             if name is None:
                 prompt = "Sorry, I didn't catch a name. Please say just your first name."
                 continue
-            if self.store.find(name):
+            existing = self.store.find(name)
+            if existing is not None and not existing.has_voice and self._returning is None:
+                # Someone Orion met before but never heard properly: same person, not a clash.
+                self._returning = existing
+                return name
+            if existing is not None:
                 prompt = f"I already know someone called {name}. What should I call you instead?"
                 continue
             last = name
@@ -284,7 +304,28 @@ class People:
                 dialog.say(f"Okay, I'll stick with {user.name}.")
             return True
 
-        if re.search(r"\b(delete|remove|forget) (my (profile|voice(print)?|account)|me|who i am)\b", t):
+        m = re.search(r"\b(?:delete|remove|forget) (?!my\b|me\b|who\b|that\b|it\b|everything\b)"
+                      r"(\w[\w' -]*?)(?:'s (?:profile|voice(?:print)?))?$", t)
+        if m and self.store.find(m.group(1)) is not None:
+            target = self.store.find(m.group(1))
+            if user is None or not user.is_owner:
+                dialog.say("Only the owner can delete other people.")
+                return True
+            if target.id == user.id:
+                m = None   # "delete Reza" by Reza: fall through to the self-delete flow
+            else:
+                answer = dialog.ask(f"Delete {target.name}'s name and voiceprint? Are you sure?",
+                                    timeout_s=self.ANSWER_TIMEOUT_S)
+                if answer is not None and yes_no(answer.text) is True:
+                    self.store.delete(target.id)
+                    dialog.say(f"Done. I've forgotten {target.name}.")
+                else:
+                    dialog.say(f"Okay, I've kept {target.name}.")
+                return True
+
+        if re.search(r"\b(delete|remove|forget) (my (profile|voice(print)?|account)|me|who i am)\b", t) or (
+                m is not None and user is not None and self.store.find(m.group(1)) is not None
+                and self.store.find(m.group(1)).id == user.id):
             if user is None:
                 dialog.say("I don't recognise your voice, so there's nothing to delete.")
                 return True

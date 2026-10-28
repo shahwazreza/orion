@@ -55,7 +55,7 @@ def setup(vec=unit(1, 0, 0)):
     ("Reza", "Reza"), ("um, it's Ali, nice to meet you", "Ali"), ("call me Jo", "Jo"),
     ("Hey Ryan, my name is Reza", "Reza"), ("Hey Orion, I'm Reza.", "Reza"),
     ("Hello there Orion, my name's Sam Lee", "Sam Lee"),
-    ("Yes", None), ("What's the weather like in London today", None), ("", None),
+    ("Yes", None), ("Bye", None), ("Bye.", None), ("Stop", None), ("Never mind", None), ("What's the weather like in London today", None), ("", None),
 ])
 def test_extract_name(text, name):
     assert extract_name(text) == name
@@ -238,3 +238,49 @@ def test_only_owner_can_teach_someone_elses_voice_and_unknown_name():
     identity.set_current(owner)
     people.handle(Heard("learn Sam's voice"), d)
     assert d.said[-1] == "I don't know anyone called Sam."
+
+
+def test_adding_a_known_but_voiceless_person_learns_their_voice_instead():
+    # Live session: Joe was saved without a voiceprint, then "add a new person" -> "Joe"
+    # was refused as a duplicate over and over.
+    store, identity, people = setup(unit(0, 1, 0))
+    owner = store.add("Reza", [unit(1, 0, 0)])
+    joe = store.add("Joe")
+    identity.set_current(owner)
+    d = ScriptedDialog(["Joe", ("I like grapes and crab and shrimp a lot", 3.5),
+                        ("My room is a filthy mess right now", 3.5)])
+    people.handle(Heard("add a new person"), d)
+    assert len(store.all()) == 2                       # no duplicate Joe
+    assert store.get(joe.id).has_voice
+    assert any("we've met" in s for s in d.said)
+    assert not any("already know someone" in s for s in d.said)
+
+
+def test_owner_can_delete_someone_else_by_voice_with_confirmation():
+    store, identity, people = setup()
+    owner, joe = store.add("Reza"), store.add("Joe")
+    identity.set_current(joe)
+    d = ScriptedDialog([])
+    people.handle(Heard("Hey Jarvis, delete Joe."), d)    # not the owner
+    assert d.said == ["Only the owner can delete other people."] and store.get(joe.id)
+    identity.set_current(owner)
+    people.handle(Heard("delete Joe"), ScriptedDialog(["no"]))
+    assert store.get(joe.id) is not None
+    people.handle(Heard("delete Joe"), ScriptedDialog(["yes"]))
+    assert store.get(joe.id) is None and store.get(owner.id) is not None
+
+
+def test_forget_unknown_name_is_not_a_people_command():
+    _, identity, people = setup()
+    assert not people.handle(Heard("forget the milk"), ScriptedDialog([]))
+
+
+def test_bye_during_introductions_cancels_instead_of_becoming_a_name():
+    # Live: a profile called "Bye" was created when someone said "bye" to "What's your name?"
+    store, identity, people = setup()
+    owner = store.add("Reza")
+    identity.set_current(owner)
+    d = ScriptedDialog(["Bye."])
+    people.handle(Heard("add a new person"), d)
+    assert [u.name for u in store.all()] == ["Reza"]
+    assert d.said[-1].startswith("No problem")

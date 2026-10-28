@@ -41,6 +41,11 @@ common:
 
   conversation:
     follow_up_s: 6.0        # after a reply, listen this long without the wake word; 0 = off
+    barge_in: wake_word     # interrupt Orion while he talks: wake_word ("hey jarvis") | voice | off.
+                            # voice (just talk over him) needs echo cancellation; through laptop
+                            # speakers his echo and room noise set it off (measured 2026-10-28).
+    barge_in_echo_threshold: 0.5   # voice closer than this to Orion's own = his echo, ignored
+    barge_in_speech_ms: 400        # this much continuous speech counts as an interruption
 
   people:
     enabled: true

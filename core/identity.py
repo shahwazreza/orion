@@ -44,8 +44,14 @@ class Identity:
             return None
         return self.encoder.embed(audio, sample_rate)
 
-    def observe(self, audio: np.ndarray, sample_rate: int = 16000, follow_up: bool = False) -> User | None:
-        """Update and return the current speaker from one utterance."""
+    def observe(self, audio: np.ndarray, sample_rate: int = 16000, follow_up: bool = False,
+                unreliable: bool = False) -> User | None:
+        """Update and return the current speaker from one utterance.
+
+        ``unreliable``: the audio is known to be mixed with Orion's own voice (the
+        user talked over him). It can confirm or switch to a clear match, but a
+        poor score must not demote the person Orion is already talking to.
+        """
         duration = len(audio) / sample_rate
         emb = self.embed(audio, sample_rate)
         if emb is None:
@@ -61,8 +67,12 @@ class Identity:
 
         if match.user is not None:
             self.current = match.user
+            if unreliable:
+                return self.current
             if match.score >= self.adapt_threshold and duration >= self.adapt_min_audio_s:
                 self.store.add_voice_sample(match.user.id, emb)
+        elif unreliable and self.current is not None:
+            pass   # mixed with Orion's echo: keep whoever we were talking to
         elif follow_up and self.current is not None:
             # Keep the current speaker only if this voice is still reasonably close to theirs.
             c = self.current.centroid()

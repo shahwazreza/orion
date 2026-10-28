@@ -21,7 +21,7 @@ class RecordingPlayer:
         self.played = []
         self.lock = threading.Lock()
 
-    def play(self, audio):
+    def play(self, audio, stop=None):
         time.sleep(0.02)
         with self.lock:
             self.played.append(float(audio[0]))
