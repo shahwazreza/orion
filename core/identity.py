@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 
 class Identity:
-    def __init__(self, store: UserStore, encoder: SpeakerEncoder | None, threshold: float = 0.55,
+    def __init__(self, store: UserStore, encoder: SpeakerEncoder | None, threshold: float = 0.40,
                  margin: float = 0.05, min_audio_s: float = 0.8, continuity_slack: float = 0.1,
                  adapt_threshold: float = 0.72, adapt_min_audio_s: float = 2.0) -> None:
         self.store = store

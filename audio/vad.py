@@ -36,7 +36,13 @@ class Status(Enum):
 
 
 class Endpointer:
-    """Collects one utterance: waits for speech, then stops after trailing silence."""
+    """Collects one utterance: waits for speech, then stops after trailing silence.
+
+    Speech must score ``threshold`` to start, but once someone is talking a frame
+    only needs ``neg_threshold`` to count as speech (hysteresis, as in Silero's own
+    segmentation). Without it, soft word endings and quiet syllables score just
+    under the start threshold, count as silence, and cut people off mid-sentence.
+    """
 
     def __init__(
         self,
@@ -47,10 +53,12 @@ class Endpointer:
         end_silence_ms: int = 800,
         max_utterance_s: float = 20.0,
         pre_roll_ms: int = 240,
+        neg_threshold: float | None = None,
     ) -> None:
         self.score = score
         self.chunk_ms = chunk_ms
         self.threshold = threshold
+        self.neg_threshold = max(0.05, threshold - 0.15) if neg_threshold is None else neg_threshold
         self.default_start_timeout_s = start_timeout_s
         self.end_frames = max(1, end_silence_ms // chunk_ms)
         self.max_frames = int(max_utterance_s * 1000 / chunk_ms)
@@ -73,10 +81,10 @@ class Endpointer:
     def push(self, frame: np.ndarray) -> Status:
         if self.status in (Status.DONE, Status.TIMEOUT):
             return self.status
-        is_speech = self.score(frame) >= self.threshold
+        p = self.score(frame)
 
         if self.status is Status.WAITING:
-            if is_speech:
+            if p >= self.threshold:
                 self.status = Status.SPEAKING
                 self._frames = [*self.pre_roll, frame]
             else:
@@ -86,6 +94,7 @@ class Endpointer:
                     self.status = Status.TIMEOUT
             return self.status
 
+        is_speech = p >= self.neg_threshold
         self._frames.append(frame)
         self._silence = 0 if is_speech else self._silence + 1
         if self._silence >= self.end_frames or len(self._frames) >= self.max_frames:
