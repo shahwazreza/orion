@@ -44,6 +44,12 @@ class Encoder:
         return self.vec
 
 
+def speaking(identity, user, confidence=0.9):
+    """Simulate a voice request that matched ``user`` at ``confidence``."""
+    identity.set_current(user)
+    identity.confidence = confidence
+
+
 def setup(vec=unit(1, 0, 0)):
     store = UserStore(None)
     identity = Identity(store, Encoder(vec), threshold=0.6)
@@ -55,7 +61,7 @@ def setup(vec=unit(1, 0, 0)):
     ("Reza", "Reza"), ("um, it's Ali, nice to meet you", "Ali"), ("call me Jo", "Jo"),
     ("Hey Ryan, my name is Reza", "Reza"), ("Hey Orion, I'm Reza.", "Reza"),
     ("Hello there Orion, my name's Sam Lee", "Sam Lee"),
-    ("Yes", None), ("What's the weather like in London today", None), ("", None),
+    ("Yes", None), ("Bye", None), ("Bye.", None), ("Stop", None), ("Never mind", None), ("What's the weather like in London today", None), ("", None),
 ])
 def test_extract_name(text, name):
     assert extract_name(text) == name
@@ -117,7 +123,7 @@ def test_only_owner_can_add_people():
     assert people.handle(Heard("add a new person"), d)
     assert "Only the owner" in d.said[0] and len(store.all()) == 1
 
-    identity.set_current(owner)
+    speaking(identity, owner)
     d = ScriptedDialog(["My name is Sam", "yes", "yes", ("one two three", 3.0), ("four five six", 3.0)])
     assert people.handle(Heard("Orion, add a new person"), d)
     sam = store.find("Sam")
@@ -137,7 +143,7 @@ def test_add_person_phrasings(text):
 def test_new_voice_that_matches_someone_else_needs_confirmation():
     store, identity, people = setup(unit(1, 0, 0))     # new person sounds exactly like Reza
     owner = store.add("Reza", [unit(1, 0, 0)])
-    identity.set_current(owner)
+    speaking(identity, owner)
     d = ScriptedDialog(["Sam", "yes", "yes", ("a b c", 3.0), ("d e f", 3.0), "no"])
     people.handle(Heard("add a new person"), d)
     assert any("sounds a lot like Reza" in s for s in d.said)
@@ -149,7 +155,7 @@ def test_who_am_i_and_who_do_you_know():
     reza = store.add("Reza")
     store.add("Sam")
     d = ScriptedDialog([])
-    identity.set_current(reza)
+    speaking(identity, reza)
     people.handle(Heard("Who am I?"), d)
     people.handle(Heard("who do you know"), d)
     assert d.said == ["You're Reza.", "I know Reza and Sam."]
@@ -161,7 +167,7 @@ def test_who_am_i_and_who_do_you_know():
 def test_rename_and_delete_need_confirmation():
     store, identity, people = setup()
     u = store.add("Reza")
-    identity.set_current(u)
+    speaking(identity, u)
     people.handle(Heard("call me Rez"), ScriptedDialog(["no"]))
     assert store.get(u.id).name == "Reza"
     people.handle(Heard("call me Rez"), ScriptedDialog(["yes"]))
@@ -221,7 +227,7 @@ def test_owner_can_teach_someone_elses_voice():
     store, identity, people = setup(unit(0, 1, 0))
     owner = store.add("Reza", [unit(1, 0, 0)])
     joe = store.add("Joe")
-    identity.set_current(owner)
+    speaking(identity, owner)
     d = ScriptedDialog([("I like grapes and crab and shrimp", 3.5), ("My room is a filthy mess", 3.5)])
     assert people.handle(Heard("learn Joe's voice"), d)
     assert store.get(joe.id).has_voice and identity.current.id == joe.id
@@ -231,10 +237,97 @@ def test_only_owner_can_teach_someone_elses_voice_and_unknown_name():
     store, identity, people = setup()
     owner = store.add("Reza")
     joe = store.add("Joe")
-    identity.set_current(joe)
+    speaking(identity, joe)
     d = ScriptedDialog([])
     people.handle(Heard("learn Reza's voice"), d)
     assert d.said == ["Only the owner can do that."]
-    identity.set_current(owner)
+    speaking(identity, owner)
     people.handle(Heard("learn Sam's voice"), d)
     assert d.said[-1] == "I don't know anyone called Sam."
+
+
+def test_adding_a_known_but_voiceless_person_learns_their_voice_instead():
+    # Live session: Joe was saved without a voiceprint, then "add a new person" -> "Joe"
+    # was refused as a duplicate over and over.
+    store, identity, people = setup(unit(0, 1, 0))
+    owner = store.add("Reza", [unit(1, 0, 0)])
+    joe = store.add("Joe")
+    speaking(identity, owner)
+    d = ScriptedDialog(["Joe", ("I like grapes and crab and shrimp a lot", 3.5),
+                        ("My room is a filthy mess right now", 3.5)])
+    people.handle(Heard("add a new person"), d)
+    assert len(store.all()) == 2                       # no duplicate Joe
+    assert store.get(joe.id).has_voice
+    assert any("we've met" in s for s in d.said)
+    assert not any("already know someone" in s for s in d.said)
+
+
+def test_owner_can_delete_someone_else_by_voice_with_confirmation():
+    store, identity, people = setup()
+    owner, joe = store.add("Reza"), store.add("Joe")
+    speaking(identity, joe)
+    d = ScriptedDialog([])
+    people.handle(Heard("Hey Jarvis, delete Joe."), d)    # not the owner
+    assert d.said == ["Only the owner can delete other people."] and store.get(joe.id)
+    speaking(identity, owner)
+    people.handle(Heard("delete Joe"), ScriptedDialog(["no"]))
+    assert store.get(joe.id) is not None
+    people.handle(Heard("delete Joe"), ScriptedDialog(["yes"]))
+    assert store.get(joe.id) is None and store.get(owner.id) is not None
+
+
+def test_forget_unknown_name_is_not_a_people_command():
+    _, identity, people = setup()
+    assert not people.handle(Heard("forget the milk"), ScriptedDialog([]))
+
+
+def test_bye_during_introductions_cancels_instead_of_becoming_a_name():
+    # Live: a profile called "Bye" was created when someone said "bye" to "What's your name?"
+    store, identity, people = setup()
+    owner = store.add("Reza")
+    speaking(identity, owner)
+    d = ScriptedDialog(["Bye."])
+    people.handle(Heard("add a new person"), d)
+    assert [u.name for u in store.all()] == ["Reza"]
+    assert d.said[-1].startswith("No problem")
+
+
+@pytest.mark.parametrize("command,replies", [
+    ("add a new person", []),
+    ("delete Joe", ["yes"]),
+    ("learn Joe's voice", []),
+    ("relearn my voice", []),
+    ("call me Rez", ["yes"]),
+    ("delete my profile", ["yes"]),
+])
+def test_sensitive_commands_need_a_strong_match_on_the_request_itself(command, replies):
+    store, identity, people = setup()
+    owner = store.add("Reza", [unit(1, 0, 0)])
+    joe = store.add("Joe")
+    for confidence in (0.45, None):            # recognised at 0.40+, or carried over: not enough
+        speaking(identity, owner, confidence)
+        d = ScriptedDialog(list(replies))
+        assert people.handle(Heard(command), d)
+        assert "need to be sure it's you" in d.said[-1]
+    assert [u.name for u in store.all()] == ["Reza", "Joe"] and not store.get(joe.id).has_voice
+
+
+def test_strong_match_and_keyboard_are_trusted():
+    store, identity, people = setup()
+    owner, joe = store.add("Reza", [unit(1, 0, 0)]), store.add("Joe")
+    speaking(identity, owner, 0.62)
+    people.handle(Heard("delete Joe"), ScriptedDialog(["yes"]))
+    assert store.get(joe.id) is None
+    sam = store.add("Sam")
+    identity.set_current(owner)                 # text mode: no voice confidence at all
+    people.handle(Heard("delete Sam"), ScriptedDialog(["yes"], hears_voice=False))
+    assert store.get(sam.id) is None
+
+
+def test_everyday_people_commands_are_not_gated():
+    store, identity, people = setup()
+    owner = store.add("Reza", [unit(1, 0, 0)])
+    speaking(identity, owner, 0.42)
+    d = ScriptedDialog([])
+    people.handle(Heard("who am I"), d)
+    assert d.said == ["You're Reza."]

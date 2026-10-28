@@ -77,3 +77,29 @@ def test_confident_long_matches_adapt_the_voiceprint():
     assert s.get(a.id).adaptive == []                  # too short to adapt
     ident.observe(THREE)
     assert len(s.get(a.id).adaptive) == 1
+
+
+def test_talking_over_orion_does_not_demote_the_current_speaker():
+    s, a, b = two_people()
+    ident, enc = make(s)
+    enc.next = unit(1, 0, 0)
+    ident.observe(SECOND)                                   # Ana, recognised
+    enc.next = unit(0.1, 0.1, 1)                            # her voice mixed with Orion's echo
+    enc.next = enc.next / np.linalg.norm(enc.next)
+    assert ident.observe(SECOND, follow_up=True, unreliable=True).id == a.id
+    enc.next = unit(0, 1, 0)                                # but a clear match still switches
+    assert ident.observe(SECOND, follow_up=True, unreliable=True).id == b.id
+
+
+def test_confidence_is_only_set_by_a_fresh_match():
+    s, a, _ = two_people()
+    ident, enc = make(s)
+    enc.next = unit(1, 0.2, 0)
+    enc.next = enc.next / np.linalg.norm(enc.next)
+    ident.observe(SECOND)
+    assert ident.confidence and ident.confidence > 0.9
+    ident.observe(np.zeros(8000, dtype=np.int16), follow_up=True)   # too short: carried over
+    assert ident.current.id == a.id and ident.confidence is None
+    enc.next = unit(1, 0, 0)
+    ident.observe(SECOND, follow_up=True, unreliable=True)          # mixed with Orion's echo
+    assert ident.confidence is None

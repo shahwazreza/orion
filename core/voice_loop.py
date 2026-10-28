@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import deque
-from typing import Callable
+from typing import Callable, Iterable
 
 import numpy as np
 
@@ -17,6 +17,7 @@ from audio.wakeword import WakeWordDetector
 from brain import profanity
 from core.assistant import Assistant, sorry
 from core import feedback
+from core.barge_in import BargeIn
 from core.dialog import Heard
 from core.identity import Identity
 from core.metrics import TurnMetrics
@@ -37,7 +38,7 @@ class VoiceLoop:
                  stt: SpeechToText, assistant: Assistant, speaker: Speaker,
                  chimes: Chimes | None, identity: Identity, people: People | None,
                  follow_up_s: float = 6.0, show: Callable[[str], None] = print,
-                 notes: TrainingNotes | None = None) -> None:
+                 notes: TrainingNotes | None = None, barge_in: BargeIn | None = None) -> None:
         self.mic = mic
         self.wake = wake
         self.endpointer = endpointer
@@ -50,6 +51,8 @@ class VoiceLoop:
         self.follow_up_s = follow_up_s
         self.show = show
         self.notes = notes or TrainingNotes(None)
+        self.barge_in = barge_in
+        self._prefill: list[np.ndarray] = []   # user speech captured by a barge-in
         frames = max(1, int(self.WAKE_AUDIO_S * 1000 / endpointer.chunk_ms))
         self._recent: deque[np.ndarray] = deque(maxlen=frames)
         self._wake_audio: np.ndarray | None = None   # memory only, dropped after one turn
@@ -77,12 +80,23 @@ class VoiceLoop:
     def listen(self, timeout_s: float | None = None, follow_up: bool = False,
                turn: TurnMetrics | None = None) -> Heard | None:
         """Record one utterance and transcribe it. None if nobody spoke or STT failed."""
-        self._chime("follow_up" if follow_up else "listening")
-        self._quiet()                       # don't record the chime or Orion himself
+        prefill, self._prefill = self._prefill, []
+        self._heard_over_orion = bool(prefill)
         self.endpointer.reset(start_timeout_s=timeout_s)
-        self.show("[listening for a follow-up]" if follow_up else "[listening]")
-
         status = Status.WAITING
+        if prefill:
+            # Barge-in: the user is already mid-sentence. Keep what they said
+            # while Orion was stopping, and don't chime over them.
+            self.speaker.wait()
+            self.wake.reset()
+            for frame in prefill:
+                status = self.endpointer.push(frame)
+            self.show("[listening: you interrupted]")
+        else:
+            self._chime("follow_up" if follow_up else "listening")
+            self._quiet()                       # don't record the chime or Orion himself
+            self.show("[listening for a follow-up]" if follow_up else "[listening]")
+
         while status in (Status.WAITING, Status.SPEAKING):
             frame = self.mic.read(timeout=1.0)
             if frame is None:
@@ -113,10 +127,11 @@ class VoiceLoop:
     # ---- main loop ----------------------------------------------------------
     def run(self, wake_phrase: str) -> None:
         self.mic.start()
-        if self.people is not None:
-            self.people.greet_on_start(self)
-        else:
-            self.say("Orion online.")
+        with self._sampling_echo():
+            if self.people is not None:
+                self.people.greet_on_start(self)
+            else:
+                self.say("Orion online.")
         self.show(f"Listening for '{wake_phrase}'. Ctrl+C to quit.")
         while True:
             frame = self.mic.read(timeout=1.0)
@@ -155,7 +170,8 @@ class VoiceLoop:
         if not follow_up and self._wake_audio is not None:
             id_audio = np.concatenate([self._wake_audio, heard.audio])
         self._wake_audio = None
-        user = self.identity.observe(id_audio, heard.sample_rate, follow_up)
+        user = self.identity.observe(id_audio, heard.sample_rate, follow_up,
+                                     unreliable=getattr(self, "_heard_over_orion", False))
         del id_audio
         turn.extra["utterance_s"] = round(heard.seconds, 2)
         turn.extra["follow_up"] = follow_up
@@ -167,6 +183,13 @@ class VoiceLoop:
             if not follow_up:
                 self.say(f"{sorry(user)} I didn't catch that.")
             return not follow_up
+
+        if getattr(self, "_heard_over_orion", False) and is_own_echo(heard.text,
+                                                                     self.speaker.recent_text):
+            # Barge-in fired on Orion's own voice from the speakers: drop it.
+            log.info("Barge-in was Orion's own echo; ignoring %d words", len(heard.text.split()))
+            turn.extra["barge_in_echo"] = True
+            return True
 
         if is_dismissal(heard.text):
             self.say(f"Any time, {user.name}." if user else "Any time.")
@@ -180,9 +203,49 @@ class VoiceLoop:
         if self.people is not None and self.people.handle(heard, self):
             return True
 
-        self.assistant.respond(heard.text, turn, self.identity.current)
+        if self.barge_in is not None:
+            self.barge_in.start()
+        try:
+            self.assistant.respond(heard.text, turn, self.identity.current)
+        finally:
+            interrupted = self.barge_in.stop() if self.barge_in is not None else None
+        if interrupted:
+            turn.extra["barge_in"] = interrupted
+            self.speaker.wait()
+            self.speaker.resume()
+            self._prefill = self.barge_in.prefill
+            # A wake-word interrupt starts a fresh request; a voice interrupt
+            # continues straight from what the user is saying.
+            return True
         self._quiet()
         return True
+
+    def _sampling_echo(self):
+        """While Orion talks at startup, sample how his voice sounds through this
+        room's speakers and mic, so barge-in can tell his echo from a person."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def cm():
+            bi = self.barge_in
+            if bi is None or bi.mode != "voice" or bi.encoder is None:
+                yield
+                return
+            frames: list[np.ndarray] = []
+            tap = lambda f: frames.append(f) if self.speaker.speaking else None  # noqa: E731
+            self.mic.taps.append(tap)
+            try:
+                yield
+            finally:
+                self.mic.taps.remove(tap)
+            n = len(frames)
+            # Embed one-second windows of echo; only Orion was talking when these were captured.
+            step = max(1, bi.window)
+            for i in range(0, n - step + 1, step):
+                bi.own_voice.add(bi.encoder.embed(np.concatenate(frames[i:i + step])))
+            log.info("Barge-in: sampled %.1fs of Orion's echo (%d voiceprints)",
+                     n * self.endpointer.chunk_ms / 1000, len(bi.own_voice.prints))
+        return cm()
 
 
 # "Thanks, Orion, that's all" -> drop politeness fillers -> "that's all" -> dismissal.
@@ -191,6 +254,25 @@ _FILLERS = {"thanks", "thank", "you", "orion", "ok", "okay", "great", "cool", "p
 _CLOSERS = {"", "that's all", "that is all", "thats all", "that's it", "thats it", "never mind",
             "nevermind", "nothing", "nothing else", "stop", "cancel", "goodbye", "bye",
             "i'm done", "im done", "all done", "i'm good", "im good", "that'll do"}
+
+
+def is_own_echo(heard: str, recent: "Iterable[str]", min_overlap: float = 0.6) -> bool:
+    """True if most words heard are words Orion just said ("your feeling" while he
+    was saying "...you're feeling frustrated"): the mic picked up his own voice."""
+    words = _echo_words(heard)
+    if not words:
+        return False
+    said = set(_echo_words(" ".join(recent)))
+    hits = sum(1 for w in words if w in said)
+    return hits / len(words) >= min_overlap
+
+
+def _echo_words(text: str) -> list[str]:
+    """Words normalised the way Whisper tends to mishear them from the speakers:
+    "you're" / "your" / "you" alike, contractions joined, plural "s" dropped."""
+    text = re.sub(r"\byou'?re\b|\byour\b", "you", text.lower())
+    words = re.findall(r"[a-z']+", text)
+    return [w.replace("'", "").rstrip("s") or w for w in words]
 
 
 def is_dismissal(text: str) -> bool:

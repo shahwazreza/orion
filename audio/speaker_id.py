@@ -53,7 +53,7 @@ class Match:
     runner_up: float       # second-best, for the ambiguity check
 
 
-def identify(embedding: np.ndarray, users: Iterable[User], threshold: float = 0.55,
+def identify(embedding: np.ndarray, users: Iterable[User], threshold: float = 0.40,
              margin: float = 0.05) -> Match:
     """Best-matching enrolled user, or None if nobody is close enough.
 

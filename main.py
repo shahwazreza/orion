@@ -241,9 +241,11 @@ def make_identity(cfg, store, encoder):
     from core.identity import Identity
 
     p = cfg.section("people")
-    return Identity(store, encoder, threshold=p.get("threshold", 0.55), margin=p.get("margin", 0.05),
+    return Identity(store, encoder, threshold=p.get("threshold", 0.40), margin=p.get("margin", 0.05),
                     min_audio_s=p.get("min_audio_s", 0.8),
-                    adapt_threshold=p.get("adapt_threshold", 0.72))
+                    continuity_slack=p.get("continuity_slack", 0.1),
+                    adapt_threshold=p.get("adapt_threshold", 0.72),
+                    adapt_min_audio_s=p.get("adapt_min_audio_s", 2.0))
 
 
 def run_text(cfg, assistant, speaker, store, notes) -> None:
@@ -356,6 +358,7 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
             end_silence_ms=vad.get("end_silence_ms", 800),
             max_utterance_s=vad.get("max_utterance_s", 20.0),
             pre_roll_ms=vad.get("pre_roll_ms", 240),
+            neg_threshold=vad.get("neg_threshold"),
         )
         with timed("Whisper STT"):
             stt = make_stt(cfg.section("stt"), models_dir)
@@ -382,10 +385,31 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
 
     log.info("Memory: %s", memory_snapshot())
     phrase = ww["model"].replace("_", " ") if not str(ww["model"]).endswith(".onnx") else "the wake word"
+    barge = None
+    conv = cfg.section("conversation")
+    mode = conv.get("barge_in", "wake_word")
+    if mode != "off":
+        from core.barge_in import BargeIn, learn_own_voice
+
+        own = None
+        if mode == "voice" and encoder is not None and speaker.tts is not None:
+            with timed("Barge-in voiceprint"):
+                own = learn_own_voice(speaker.tts, encoder, [
+                    "Good morning. Here's what's on today, and a quick look at the weather.",
+                    "That's a cracking question. The short answer is yes, but there's a catch.",
+                ])
+        barge = BargeIn(mic, wake, endpointer.score, speaker, mode=mode, encoder=encoder,
+                        own_voice=own, chunk_ms=audio["chunk_ms"],
+                        echo_threshold=conv.get("barge_in_echo_threshold", 0.5),
+                        speech_ms=conv.get("barge_in_speech_ms", 400))
+        log.info("Barge-in: %s", barge.mode)
+
     identity = make_identity(cfg, store, encoder)
-    people = People(store, identity, enroll_target_s=people_cfg.get("enroll_target_s", 10.0)) if encoder else None
+    people = People(store, identity, enroll_target_s=people_cfg.get("enroll_target_s", 10.0),
+                    verify_threshold=people_cfg.get("verify_threshold", 0.55)) if encoder else None
     loop = VoiceLoop(mic, wake, endpointer, stt, assistant, speaker, chimes, identity, people,
-                     follow_up_s=cfg.get("conversation.follow_up_s", 6.0), notes=notes)
+                     follow_up_s=cfg.get("conversation.follow_up_s", 6.0), notes=notes,
+                     barge_in=barge)
     try:
         if relearn:
             mic.start()

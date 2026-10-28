@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import queue
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -52,12 +52,20 @@ class Microphone:
         self._q: queue.Queue[np.ndarray] = queue.Queue(maxsize=256)
         self._stream = None
         self.overflows = 0
+        # Taps see every frame without consuming it (e.g. sampling Orion's echo).
+        self.taps: list[Callable[[np.ndarray], None]] = []
 
     def _callback(self, indata, frames, time_info, status) -> None:
         if status and status.input_overflow:
             self.overflows += 1
+        frame = indata[:, 0].copy()
+        for tap in list(self.taps):
+            try:
+                tap(frame)
+            except Exception:
+                log.exception("Microphone tap failed")
         try:
-            self._q.put_nowait(indata[:, 0].copy())
+            self._q.put_nowait(frame)
         except queue.Full:
             self.overflows += 1  # consumer stalled; drop rather than block the audio thread
 

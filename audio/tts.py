@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
 
@@ -138,9 +139,16 @@ class AudioPlayer:
         except Exception as exc:
             raise AudioDeviceError(f"Could not open the speakers: {exc}") from exc
 
-    def play(self, audio: np.ndarray) -> None:
-        if audio.size:
-            self._stream.write(audio.reshape(-1, 1))
+    BLOCK_S = 0.05   # write in small blocks so playback can stop within ~50 ms
+
+    def play(self, audio: np.ndarray, stop: Callable[[], bool] | None = None) -> None:
+        if not audio.size:
+            return
+        block = max(1, int(self.sample_rate * self.BLOCK_S))
+        for start in range(0, len(audio), block):
+            if stop is not None and stop():
+                return
+            self._stream.write(audio[start:start + block].reshape(-1, 1))
 
     def close(self) -> None:
         self._stream.stop()
@@ -174,6 +182,11 @@ class Speaker:
         self._pending = 0
         self._lock = threading.Lock()
         self._first_audio_cb: Callable[[], None] | None = None
+        # Set by interrupt() (barge-in): queued speech is skipped, playback stops.
+        self._interrupted = threading.Event()
+        # What Orion said most recently, so an "interruption" that is really his
+        # own echo can be recognised from its words.
+        self.recent_text: deque[str] = deque(maxlen=6)
         self._threads = [
             threading.Thread(target=self._synth_loop, name="speaker-synth", daemon=True),
             threading.Thread(target=self._play_loop, name="speaker-play", daemon=True),
@@ -183,6 +196,23 @@ class Speaker:
 
     def begin(self, on_first_audio: Callable[[], None] | None = None) -> None:
         self._first_audio_cb = on_first_audio
+        self._interrupted.clear()
+
+    @property
+    def speaking(self) -> bool:
+        return not self._idle.is_set()
+
+    @property
+    def interrupted(self) -> bool:
+        return self._interrupted.is_set()
+
+    def interrupt(self) -> None:
+        """Stop talking now: the current chunk stops within ~50 ms and everything
+        still queued is dropped. Cleared by begin() or resume()."""
+        self._interrupted.set()
+
+    def resume(self) -> None:
+        self._interrupted.clear()
 
     def _enqueue(self, item: Any) -> None:
         with self._lock:
@@ -218,10 +248,15 @@ class Speaker:
                 if isinstance(item, np.ndarray):
                     self._play_q.put(("chime", item))
                 else:
-                    if self.echo:
-                        self.echo(item)
-                    if self.tts is not None and self.player is not None:
+                    if not self._interrupted.is_set():
+                        self.recent_text.append(item)
+                        if self.echo:
+                            self.echo(item)
+                    if (self.tts is not None and self.player is not None
+                            and not self._interrupted.is_set()):
                         for chunk in self.tts.synthesize(item):
+                            if self._interrupted.is_set():
+                                break
                             self._play_q.put(("speech", chunk))
             except Exception:
                 log.exception("Speech synthesis failed")
@@ -240,11 +275,13 @@ class Speaker:
                         self._idle.set()
                 continue
             kind, audio = item
+            if self._interrupted.is_set():
+                continue    # dropped; its END marker still settles the pending count
             if kind == "speech":
                 cb, self._first_audio_cb = self._first_audio_cb, None
                 if cb:
                     cb()
             try:
-                self.player.play(audio)
+                self.player.play(audio, stop=self._interrupted.is_set)
             except Exception:
                 log.exception("Playback failed")

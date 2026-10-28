@@ -95,6 +95,14 @@ python main.py -v               # debug logging
 Text-mode commands: `/reset` clears the conversation, `/stats` shows the last
 turn's timings, `/quit` exits. Ctrl+C exits either mode.
 
+**Barge-in:** say "hey jarvis" while Orion talks and he stops within ~50 ms
+(`conversation.barge_in: wake_word`, default). An experimental `voice` mode lets
+you just talk over him: his own echo is told apart from people by speaker
+embedding (his TTS voiceprint plus room echo sampled at startup), two
+consecutive checks, and a transcript-overlap check. Through laptop speakers it
+still triggers on room noise, so it needs echo cancellation (headset,
+speakerphone, or PipeWire echo-cancel).
+
 **Conversation mode:** after Orion answers, he keeps listening for 6 seconds
 (`conversation.follow_up_s`), so follow-ups don't need the wake word. A soft
 single chime means he's still listening. Stay silent, or say "thanks, that's all",
@@ -129,13 +137,19 @@ key lives in the system keyring (KWallet / GNOME Keyring via Secret Service),
 never on disk or in git. If the keyring is unavailable, Orion warns you and
 remembers people for that session only.
 
+**Two levels of match:** recognising someone uses `people.threshold` (0.40),
+measured with `scripts/voice_eval.py` on LibriSpeech: 4% of noisy commands missed,
+about 1% of strangers accepted. Anything that changes who Orion trusts (adding,
+deleting, relearning or renaming people) needs `people.verify_threshold` (0.55)
+on that request itself, which no stranger reached in testing.
+
 **Not security:** voice recognition is for personalisation. A recording of
 someone can fool it, so it never unlocks anything sensitive on its own. Later
 phases keep passphrases and spoken confirmations for that.
 
 **Tuning:** run with `-v` to see match scores. If Orion mixes people up, raise
-`people.threshold` (e.g. 0.65). If he often fails to recognise you, lower it
-(e.g. 0.45) or say "relearn my voice" in the room and with the mic you normally
+`people.threshold` (e.g. 0.50). If he often fails to recognise you, lower it
+(e.g. 0.35) or say "relearn my voice" in the room and with the mic you normally
 use. Confident matches also refine your voiceprint automatically over time.
 
 ## Language

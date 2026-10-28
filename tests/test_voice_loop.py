@@ -90,7 +90,7 @@ class FakeIdentity:
     def start_conversation(self):
         self.current = None
 
-    def observe(self, audio, sample_rate=16000, follow_up=False):
+    def observe(self, audio, sample_rate=16000, follow_up=False, unreliable=False):
         self.seen_seconds.append(len(audio) / sample_rate)
         self.current = User(id="r", name="Reza")
         return self.current
