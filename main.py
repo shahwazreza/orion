@@ -405,7 +405,8 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
         log.info("Barge-in: %s", barge.mode)
 
     identity = make_identity(cfg, store, encoder)
-    people = People(store, identity, enroll_target_s=people_cfg.get("enroll_target_s", 10.0)) if encoder else None
+    people = People(store, identity, enroll_target_s=people_cfg.get("enroll_target_s", 10.0),
+                    verify_threshold=people_cfg.get("verify_threshold", 0.55)) if encoder else None
     loop = VoiceLoop(mic, wake, endpointer, stt, assistant, speaker, chimes, identity, people,
                      follow_up_s=cfg.get("conversation.follow_up_s", 6.0), notes=notes,
                      barge_in=barge)

@@ -334,6 +334,21 @@ nearby. Joe can't ask for it himself, because Orion can't recognise him yet.
 - From the terminal (any person): see section 13.
 - If the owner is deleted, the next person Orion met becomes owner.
 
+### Changes that need a clear match
+
+Orion recognises you at a fairly relaxed level, so he still knows you in a noisy
+room. That relaxed level lets about 1 stranger in 100 pass as someone he knows,
+so **anything that changes who he trusts needs a clear match on that request
+itself**:
+
+- adding a person, deleting someone, learning someone else's voice (owner)
+- relearning your own voice, renaming yourself, deleting your profile
+
+If the match isn't clear, he says *"For that I need to be sure it's you…"*.
+Say "hey jarvis" and ask again in a full sentence, close to the mic. Being
+recognised earlier in the same conversation isn't enough on its own. Text mode
+is your keyboard, so it skips this check. The level is `people.verify_threshold`.
+
 > **Voice recognition is a convenience, not security.** A recording of someone's
 > voice could fool it. Orion never unlocks anything sensitive on a voice match
 > alone; later phases use passphrases and spoken confirmations for that.
@@ -531,7 +546,8 @@ and the right one is picked automatically. Restart Orion after changing anything
 | Setting | Default | Meaning |
 |---|---|---|
 | `conversation.follow_up_s` | `6.0` | Seconds he waits for a follow-up; `0` = wake word every time |
-| `vad.end_silence_ms` | `800` | Silence that means you've finished. Raise if he cuts you off |
+| `vad.end_silence_ms` | `1000` | Silence that means you've finished. Raise if he cuts you off |
+| `vad.neg_threshold` | `0.35` | Once you're talking, quieter sounds still count as speech, so soft word endings don't cut you off |
 | `vad.start_timeout_s` | `6.0` | How long he waits for you to start after the wake word |
 | `vad.max_utterance_s` | `20.0` | Longest single recording |
 | `vad.threshold` | `0.5` | How sure the speech detector must be that you're talking |
@@ -541,7 +557,8 @@ and the right one is picked automatically. Restart Orion after changing anything
 | Setting | Default | Meaning |
 |---|---|---|
 | `people.enabled` | `true` | Voice recognition on or off |
-| `people.threshold` | `0.55` | How similar a voice must be to count as you. Raise if he mixes people up; lower if he doesn't recognise you |
+| `people.threshold` | `0.40` | How similar a voice must be to count as you. Raise if he mixes people up; lower if he doesn't recognise you |
+| `people.verify_threshold` | `0.55` | Stricter match needed for adding, deleting, relearning or renaming people |
 | `people.margin` | `0.05` | How clearly the best match must beat the second-best |
 | `people.min_audio_s` | `0.8` | Shorter clips aren't used to judge who's speaking |
 | `people.adapt_threshold` | `0.72` | Matches this confident refine your voice signature |
@@ -645,8 +662,8 @@ noise, or lower `vad.end_silence_ms` slightly.
 **He doesn't recognise me, or mixes people up.**
 Run with `-v` to see match scores. Say "relearn my voice" using the mic and room
 you normally use. If he doesn't recognise you at all, he can't tell who's asking,
-so stop Orion and run `python main.py users relearn YOURNAME` instead. If he still misses you, lower `people.threshold` to `0.45`; if
-he confuses two people, raise it to `0.65`.
+so stop Orion and run `python main.py users relearn YOURNAME` instead. If he still misses you, lower `people.threshold` to `0.35`; if
+he confuses two people, raise it to `0.50`.
 
 **"Heads up: I can't reach the system keyring."**
 KDE Wallet is off or locked. Enable it in System Settings → KDE Wallet. Until

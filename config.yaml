@@ -57,6 +57,9 @@ common:
     # enrolled person about 1.4% of the time (vs 0.2% at 0.55).
     threshold: 0.40         # min cosine similarity to recognise someone; raise if it mixes people up
     margin: 0.05            # best match must beat the runner-up by this much
+    verify_threshold: 0.55  # stricter match needed for anything that changes who Orion trusts:
+                            # adding/deleting people, relearning or renaming. At 0.40 about 1
+                            # stranger in 100 passes as someone (scripts/voice_eval.py).
     min_audio_s: 0.8        # shorter clips are too short to judge
     continuity_slack: 0.1   # in a follow-up, keep the current speaker down to threshold - slack
     adapt_threshold: 0.72   # confident matches refine the voiceprint over time; lower lets

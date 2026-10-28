@@ -32,12 +32,18 @@ class Identity:
         self.adapt_min_audio_s = adapt_min_audio_s
         self.current: User | None = None
         self.last_match: Match | None = None
+        # How closely *this* utterance matched the current speaker's voiceprint.
+        # None when it couldn't be judged (too short, mixed with Orion's echo) or
+        # when the speaker was carried over from earlier in the conversation.
+        self.confidence: float | None = None
 
     def start_conversation(self) -> None:
         self.current = None
+        self.confidence = None
 
     def set_current(self, user: User | None) -> None:
         self.current = user
+        self.confidence = None
 
     def embed(self, audio: np.ndarray, sample_rate: int = 16000) -> np.ndarray | None:
         if self.encoder is None or len(audio) < self.min_audio_s * sample_rate:
@@ -54,6 +60,7 @@ class Identity:
         """
         duration = len(audio) / sample_rate
         emb = self.embed(audio, sample_rate)
+        self.confidence = None
         if emb is None:
             # Too short to judge: trust the ongoing conversation, otherwise unknown.
             if not follow_up:
@@ -69,6 +76,7 @@ class Identity:
             self.current = match.user
             if unreliable:
                 return self.current
+            self.confidence = match.score
             if match.score >= self.adapt_threshold and duration >= self.adapt_min_audio_s:
                 self.store.add_voice_sample(match.user.id, emb)
         elif unreliable and self.current is not None:

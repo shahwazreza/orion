@@ -68,12 +68,17 @@ class People:
     SHORT_ANSWER_S = 2.5    # shorter answers get one "could you say a bit more?"
 
     def __init__(self, store: UserStore, identity: Identity, enroll_target_s: float = 10.0,
-                 min_answer_s: float = 1.0, duplicate_voice_score: float = 0.7) -> None:
+                 min_answer_s: float = 1.0, duplicate_voice_score: float = 0.7,
+                 verify_threshold: float = 0.55) -> None:
         self.store = store
         self.identity = identity
         self.enroll_target_s = enroll_target_s
         self.min_answer_s = min_answer_s
         self.duplicate_voice_score = duplicate_voice_score
+        # Recognising someone uses identity.threshold (0.40), which lets about 1 in
+        # 100 strangers through (scripts/voice_eval.py). Anything that changes who
+        # Orion trusts needs this stronger match on the request itself.
+        self.verify_threshold = verify_threshold
         self._returning: User | None = None   # set when a "new" person is a voiceless existing one
 
     # ---- onboarding -------------------------------------------------------
@@ -217,6 +222,24 @@ class People:
         return True
 
     # ---- commands ---------------------------------------------------------
+    def _verified(self, dialog: Dialog, user: User) -> bool:
+        """Is this request clearly from ``user``? Speaks a retry hint if not.
+
+        The keyboard (text mode) is trusted. By voice, the request itself must
+        match the user's voiceprint at ``verify_threshold``: being carried over
+        from earlier in a conversation isn't enough.
+        """
+        if not dialog.hears_voice:
+            return True
+        c = self.identity.confidence
+        if c is not None and c >= self.verify_threshold:
+            return True
+        log.info("Sensitive request not verified (confidence %s)",
+                 "n/a" if c is None else f"{c:.2f}")
+        dialog.say(f"For that I need to be sure it's you, {user.name}. Say hey jarvis, then "
+                   "ask again in a full sentence, close to the mic.")
+        return False
+
     def handle(self, heard: Heard, dialog: Dialog) -> bool:
         """Handle people-related commands. Returns True if the utterance was one."""
         t = heard.text.lower().strip().rstrip(".!?")
@@ -248,6 +271,8 @@ class People:
             if user is None or not user.is_owner:
                 dialog.say("Only the owner can add new people. Ask them to say: add a new person.")
                 return True
+            if not self._verified(dialog, user):
+                return True
             dialog.say("Of course. Could the new person come close and answer me?")
             new = self.meet(dialog)
             if new is not None:
@@ -260,6 +285,8 @@ class People:
             # with no voiceprint yet, since Orion can't recognise them to let them ask.
             if user is None or not user.is_owner:
                 dialog.say("Only the owner can do that.")
+                return True
+            if not self._verified(dialog, user):
                 return True
             target = self.store.find(m.group(1))
             if target is None:
@@ -274,6 +301,8 @@ class People:
             if user is None:
                 dialog.say("I don't recognise your voice yet, so I can't tell whose voice to "
                            "learn. Ask the owner to say: learn, your name's, voice.")
+                return True
+            if not self._verified(dialog, user):   # a lookalike could replace your voiceprint
                 return True
             self.enroll_voice(dialog, user)
             return True
@@ -296,6 +325,8 @@ class People:
             if name == user.name:
                 dialog.say(f"I know, {name}.")
                 return True
+            if not self._verified(dialog, user):
+                return True
             answer = dialog.ask(f"Should I call you {name} from now on, instead of {user.name}?")
             if answer is not None and yes_no(answer.text) is True:
                 self.store.rename(user.id, name)
@@ -313,6 +344,8 @@ class People:
                 return True
             if target.id == user.id:
                 m = None   # "delete Reza" by Reza: fall through to the self-delete flow
+            elif not self._verified(dialog, user):
+                return True
             else:
                 answer = dialog.ask(f"Delete {target.name}'s name and voiceprint? Are you sure?",
                                     timeout_s=self.ANSWER_TIMEOUT_S)
@@ -328,6 +361,8 @@ class People:
                 and self.store.find(m.group(1)).id == user.id):
             if user is None:
                 dialog.say("I don't recognise your voice, so there's nothing to delete.")
+                return True
+            if not self._verified(dialog, user):
                 return True
             answer = dialog.ask(f"This deletes your name and voiceprint, {user.name}. "
                                 "Are you sure?")

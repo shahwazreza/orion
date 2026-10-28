@@ -137,13 +137,19 @@ key lives in the system keyring (KWallet / GNOME Keyring via Secret Service),
 never on disk or in git. If the keyring is unavailable, Orion warns you and
 remembers people for that session only.
 
+**Two levels of match:** recognising someone uses `people.threshold` (0.40),
+measured with `scripts/voice_eval.py` on LibriSpeech: 4% of noisy commands missed,
+about 1% of strangers accepted. Anything that changes who Orion trusts (adding,
+deleting, relearning or renaming people) needs `people.verify_threshold` (0.55)
+on that request itself, which no stranger reached in testing.
+
 **Not security:** voice recognition is for personalisation. A recording of
 someone can fool it, so it never unlocks anything sensitive on its own. Later
 phases keep passphrases and spoken confirmations for that.
 
 **Tuning:** run with `-v` to see match scores. If Orion mixes people up, raise
-`people.threshold` (e.g. 0.65). If he often fails to recognise you, lower it
-(e.g. 0.45) or say "relearn my voice" in the room and with the mic you normally
+`people.threshold` (e.g. 0.50). If he often fails to recognise you, lower it
+(e.g. 0.35) or say "relearn my voice" in the room and with the mic you normally
 use. Confident matches also refine your voiceprint automatically over time.
 
 ## Language
