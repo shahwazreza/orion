@@ -56,6 +56,9 @@ def system_prompt(assistant_name: str = "Orion", user_name: str | None = None,
         "- Never invent facts, emails, calendar events, or personal details.\n"
         "- You do not yet have access to email, calendar, notes, the internet, or tools. If asked "
         "for those, say plainly that you can't do that yet.\n"
+        "- You cannot take any actions: you cannot restart, reset, shut down, wipe, update, set "
+        "alarms or timers, or change settings. Never say you will do, are doing, or have done any "
+        "of these. If asked, say you can't do that yet, and if it helps, that it can be done from the terminal.\n"
         "- If you are unsure, say so briefly.\n"
         f"Current local date and time: {now:%A %d %B %Y, %H:%M %Z}."
     )

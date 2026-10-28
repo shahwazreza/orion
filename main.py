@@ -5,7 +5,8 @@
     python main.py --text          # type instead of talk; replies still spoken
     python main.py --text --no-tts # pure text, for debugging the brain
     python main.py --list-devices
-    python main.py users [list | rename OLD NEW | delete NAME]
+    python main.py users [list | rename OLD NEW | delete NAME | relearn NAME]
+    python main.py notes [list | clear]
 """
 
 from __future__ import annotations
@@ -33,7 +34,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--demo", action="store_true",
                    help="demo mode for IT demos / interviews: clean language, demo overrides")
     p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
-    p.add_argument("command", nargs="*", help="optional: users [list | rename OLD NEW | delete NAME]")
+    p.add_argument("command", nargs="*",
+                   help="optional: users [list | rename OLD NEW | delete NAME | relearn NAME], "
+                        "notes [list | clear]")
     return p.parse_args(argv)
 
 
@@ -48,8 +51,10 @@ def setup_logging(verbose: bool) -> None:
     for noisy in ("httpx", "httpcore", "faster_whisper"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     # phonemizer (used by Kokoro) warns "words count mismatch" whenever espeak splits
-    # or merges words (contractions, numbers). It is harmless.
-    logging.getLogger("phonemizer").setLevel(logging.ERROR)
+    # or merges words (contractions, numbers). It is harmless. A filter is used,
+    # not a level, because phonemizer resets its logger's level on every backend load.
+    logging.getLogger("phonemizer").addFilter(
+        lambda record: "words count mismatch" not in record.getMessage())
 
 
 def timed(label: str):
@@ -90,11 +95,22 @@ def main(argv: list[str] | None = None) -> int:
     from core.metrics import MetricsSink, memory_snapshot
     from core.net_guard import NetworkPolicyError, exposed_listeners, port_of
 
-    if args.command:
-        if args.command[0] != "users":
-            log.error("Unknown command %r. Try: users list", args.command[0])
+    relearn = None
+    if args.command[:2] == ["users", "relearn"]:
+        # Voice learning started from the keyboard: the recovery path when Orion no
+        # longer recognises someone (even the owner), since by voice he can't tell
+        # who's asking. Whoever is at the keyboard is trusted, as in text mode.
+        if len(args.command) != 3:
+            log.error("Usage: python main.py users relearn NAME")
             return 2
-        return users_cli(cfg, args.command[1:])
+        relearn = args.command[2]
+    elif args.command:
+        if args.command[0] == "users":
+            return users_cli(cfg, args.command[1:])
+        if args.command[0] == "notes":
+            return notes_cli(cfg, args.command[1:])
+        log.error("Unknown command %r. Try: users list, notes list", args.command[0])
+        return 2
 
     models_dir = cfg.path("paths.models")
     log.info("Profile: %s", cfg.profile)
@@ -134,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
     assistant = Assistant(llm, speaker, metrics, cfg.profile, name,
                           max_history_turns=cfg.get("llm.max_history_turns", 8), profanity=policy)
     store = open_user_store(cfg)
+    notes = open_training_notes(cfg)
 
     try:
         with timed(f"LLM {llm_cfg['model']}"):
@@ -145,11 +162,14 @@ def main(argv: list[str] | None = None) -> int:
         speaker.say(f"{exc.spoken} I'll keep trying when you speak to me.")
 
     try:
+        if relearn:
+            return run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
+                             relearn=relearn)
         if args.text:
             log.info("Memory: %s", memory_snapshot())
-            run_text(cfg, assistant, speaker, store)
+            run_text(cfg, assistant, speaker, store, notes)
         else:
-            return run_voice(cfg, assistant, speaker, chimes, models_dir, store)
+            return run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes)
     except KeyboardInterrupt:
         print()
     finally:
@@ -171,6 +191,52 @@ def open_user_store(cfg):
     return UserStore(EncryptedJSONFile(cfg.path("paths.data") / "users.enc", key, "users"))
 
 
+def open_training_notes(cfg, force: bool = False):
+    """Opt-in (training_notes.enabled). Encrypted like everything personal."""
+    from security.keystore import KeyStoreError, get_data_key
+    from storage.encrypted_file import EncryptedJSONFile
+    from storage.training_notes import TrainingNotes
+
+    enabled = bool(cfg.get("training_notes.enabled", False))
+    if not (enabled or force):
+        return TrainingNotes(None)
+    try:
+        key = get_data_key()
+    except KeyStoreError as exc:
+        log.warning("%s. Training notes disabled.", exc)
+        return TrainingNotes(None)
+    path = cfg.path("paths.data") / "training_notes.enc"
+    return TrainingNotes(EncryptedJSONFile(path, key, "training-notes"), enabled=enabled)
+
+
+def notes_cli(cfg, args: list[str]) -> int:
+    from datetime import datetime
+
+    notes = open_training_notes(cfg, force=True)
+    if notes.file is None:
+        log.error("Keyring unavailable; can't open training notes.")
+        return 1
+    action = args[0] if args else "list"
+    if action == "list":
+        entries = notes.all()
+        if not entries:
+            state = "on" if notes.enabled else "off (training_notes.enabled in config.yaml)"
+            print(f"No training notes. Logging is {state}.")
+        for e in entries:
+            ctx = " ".join(f"{k}={v}" for k, v in e.get("context", {}).items())
+            print(f"{datetime.fromtimestamp(e['ts']):%Y-%m-%d %H:%M}  {e['kind']:<13} "
+                  f"{e.get('note', '-')}\n                  {ctx}")
+        return 0
+    if action == "clear":
+        if input("Delete all training notes? Type yes to confirm: ").strip().lower() != "yes":
+            print("Cancelled.")
+            return 1
+        print(f"Deleted {notes.clear()} notes.")
+        return 0
+    print("Usage: python main.py notes [list | clear]")
+    return 2
+
+
 def make_identity(cfg, store, encoder):
     from core.identity import Identity
 
@@ -180,7 +246,7 @@ def make_identity(cfg, store, encoder):
                     adapt_threshold=p.get("adapt_threshold", 0.72))
 
 
-def run_text(cfg, assistant, speaker, store) -> None:
+def run_text(cfg, assistant, speaker, store, notes) -> None:
     """Text mode is the owner's terminal, so it acts as the owner."""
     from core.dialog import TextDialog
     from core.metrics import TurnMetrics
@@ -211,6 +277,10 @@ def run_text(cfg, assistant, speaker, store) -> None:
         from brain.profanity import handle_command
         from core.dialog import Heard
 
+        from core import feedback
+
+        if feedback.handle(Heard(line), dialog, identity.current, notes, assistant.last_turn):
+            continue
         mode_reply = handle_command(line, assistant.profanity)
         if mode_reply:
             dialog.say(mode_reply)
@@ -223,6 +293,7 @@ def run_text(cfg, assistant, speaker, store) -> None:
 def users_cli(cfg, args: list[str]) -> int:
     """List, rename, or delete people from the terminal (deletion asks first)."""
     store = open_user_store(cfg)
+    notes = open_training_notes(cfg)
     if not store.persistent:
         log.error("Keyring unavailable; can't open the user store.")
         return 1
@@ -258,7 +329,8 @@ def users_cli(cfg, args: list[str]) -> int:
     return 2
 
 
-def run_voice(cfg, assistant, speaker, chimes, models_dir, store) -> int:
+def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
+              relearn: str | None = None) -> int:
     from audio.devices import AudioDeviceError, Microphone
     from audio.stt import make_stt
     from audio.vad import Endpointer, SileroVAD
@@ -299,13 +371,26 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store) -> int:
         log.error("%s", exc)
         return 1
 
+    if relearn:
+        user = store.find(relearn)
+        if user is None:
+            log.error("No user called %r. See: python main.py users list", relearn)
+            return 1
+        if encoder is None:
+            log.error("Voice recognition is disabled (people.enabled: false)")
+            return 1
+
     log.info("Memory: %s", memory_snapshot())
     phrase = ww["model"].replace("_", " ") if not str(ww["model"]).endswith(".onnx") else "the wake word"
     identity = make_identity(cfg, store, encoder)
     people = People(store, identity, enroll_target_s=people_cfg.get("enroll_target_s", 10.0)) if encoder else None
     loop = VoiceLoop(mic, wake, endpointer, stt, assistant, speaker, chimes, identity, people,
-                     follow_up_s=cfg.get("conversation.follow_up_s", 6.0))
+                     follow_up_s=cfg.get("conversation.follow_up_s", 6.0), notes=notes)
     try:
+        if relearn:
+            mic.start()
+            speaker.say(f"Hello, {user.name}. Let's relearn your voice.")
+            return 0 if people.enroll_voice(loop, user) else 1
         loop.run(phrase)
     except AudioDeviceError as exc:
         log.error("%s", exc)

@@ -57,10 +57,22 @@ _YES = {"yes", "yeah", "yep", "yup", "sure", "correct", "right", "ok", "okay", "
 _NO = {"no", "nope", "nah", "not", "don't", "dont", "wrong", "incorrect", "never", "cancel", "stop"}
 
 
+# Affirmations people actually say, beyond a bare "yes".
+_YES_PHRASES = re.compile(
+    r"\b(you got it|got it right|that'?s right|that is right|spot on|exactly|sounds right|"
+    r"i reckon|that'?s it|that'?s correct|you'?re right|correct|perfect|right on|bang on)\b")
+
+
 def yes_no(text: str) -> bool | None:
     """True for a yes, False for a no, None if unclear. 'No' wins over 'yes' ("yes, no wait")."""
-    words = re.sub(r"[^a-z' ]", " ", text.lower()).split()
-    if not words or len(words) > 8:
+    lowered = text.lower()
+    words = re.sub(r"[^a-z' ]", " ", lowered).split()
+    if not words or len(words) > 10:
+        return None
+    if _YES_PHRASES.search(lowered) and not any(w in {"no", "nope", "nah", "not", "wrong"}
+                                                 for w in words):
+        return True
+    if len(words) > 8:
         return None
     if any(w in _NO for w in words):
         return False

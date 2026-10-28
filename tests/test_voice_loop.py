@@ -71,6 +71,7 @@ class Assistant:
     def __init__(self):
         self.heard = []
         self.profanity = ProfanityPolicy("on")
+        self.last_turn = None
 
     def respond(self, text, turn, user=None):
         self.heard.append(text)
@@ -80,13 +81,17 @@ class Assistant:
 
 
 class FakeIdentity:
-    """Everyone is Reza."""
+    """Everyone is Reza. Records how much audio it was given to judge."""
     current = None
+
+    def __init__(self):
+        self.seen_seconds = []
 
     def start_conversation(self):
         self.current = None
 
     def observe(self, audio, sample_rate=16000, follow_up=False):
+        self.seen_seconds.append(len(audio) / sample_rate)
         self.current = User(id="r", name="Reza")
         return self.current
 
@@ -104,10 +109,10 @@ class Chimes:
     listening, follow_up, done = "listening", "follow_up", "done"
 
 
-def run(script, texts, follow_up_s=6.0):
+def run(script, texts, follow_up_s=6.0, identity=None):
     ep, assistant, speaker = ScriptedEndpointer(script), Assistant(), Speaker()
     loop = VoiceLoop(Mic(n=50), Wake(), ep, STT(texts), assistant, speaker, None,
-                     FakeIdentity(), None, follow_up_s=follow_up_s, show=lambda s: None)
+                     identity or FakeIdentity(), None, follow_up_s=follow_up_s, show=lambda s: None)
     with pytest.raises(KeyboardInterrupt):
         loop.run("hey jarvis")
     assert speaker.said[0] == "Orion online."
@@ -163,3 +168,11 @@ def test_keep_it_clean_is_a_command_not_a_question():
     assert assistant.heard == ["what's up"]
     assert speaker.said[0].startswith("Understood. Keeping it clean")
     assert speaker.said[1] == "Back to normal."
+
+
+def test_wake_word_audio_helps_identify_the_first_utterance_only():
+    ident = FakeIdentity()
+    run(["speech", "speech", "silence"], ["who am I", "and tomorrow"], identity=ident)
+    first, follow = ident.seen_seconds
+    assert first == pytest.approx(1.0 + 1280 / 16000)   # utterance + the wake-word frame
+    assert follow == pytest.approx(1.0)                 # follow-ups: utterance only

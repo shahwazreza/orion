@@ -24,7 +24,7 @@ common:
 
   paths:
     models: models
-    data: data          # unused until Phase 2.5 (encrypted store)
+    data: data          # encrypted personal data (users, training notes); key in the keyring
     logs: logs
 
   audio:
@@ -76,11 +76,11 @@ common:
     num_ctx: 4096
     keep_alive: 30m         # keep the model resident between requests
     think: null             # null = don't send; set false for reasoning models (qwen3)
-    max_history_turns: 8    # in-memory only; nothing is written to disk in Phase 1
+    max_history_turns: 8    # per person, in memory only; chat history is never written to disk
     timeout_s: 90
 
   tts:
-    backend: kokoro         # kokoro (natural, ~1s slower to start on CPU) | piper (fast, robotic)
+    backend: kokoro         # kokoro (natural, ~2.5 s slower to start on laptop CPU) | piper (fast, robotic)
     use_cuda: auto          # auto -> only if onnxruntime has the CUDA provider
     kokoro:
       model: kokoro-v1.0.onnx   # int8 variant (kokoro-v1.0.int8.onnx) is 3.5x smaller, same speed on this CPU
@@ -92,6 +92,10 @@ common:
       voice: en_GB-alan-medium  # also downloaded: en_GB-northern_english_male-medium, en_GB-semaine-medium
       speaker_id: null      # multi-speaker voices only, e.g. semaine: 1 = spike, 2 = obadiah
       length_scale: 1.0     # >1 slower speech, <1 faster
+
+  training_notes:
+    enabled: false          # opt-in: "that was wrong" logs the failure type and an optional
+                            # short note (encrypted). Never questions, replies, or personal data.
 
   metrics:
     enabled: true           # timings + memory only; never transcript text

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import deque
 from typing import Callable
+
+import numpy as np
 
 from audio.devices import Microphone
 from audio.stt import SpeechToText
@@ -13,21 +16,28 @@ from audio.vad import Endpointer, Status
 from audio.wakeword import WakeWordDetector
 from brain import profanity
 from core.assistant import Assistant, sorry
+from core import feedback
 from core.dialog import Heard
 from core.identity import Identity
 from core.metrics import TurnMetrics
 from core.people import People
+from storage.training_notes import TrainingNotes
 
 log = logging.getLogger(__name__)
 
 
 class VoiceLoop:
     hears_voice = True   # also serves as the Dialog for onboarding
+    # "Hey jarvis" is said in the same voice as the request that follows, so the
+    # audio just before the wake word fired is added when identifying the speaker.
+    # It turns a too-short "who am I?" (~0.6 s) into enough voice to judge.
+    WAKE_AUDIO_S = 1.5
 
     def __init__(self, mic: Microphone, wake: WakeWordDetector, endpointer: Endpointer,
                  stt: SpeechToText, assistant: Assistant, speaker: Speaker,
                  chimes: Chimes | None, identity: Identity, people: People | None,
-                 follow_up_s: float = 6.0, show: Callable[[str], None] = print) -> None:
+                 follow_up_s: float = 6.0, show: Callable[[str], None] = print,
+                 notes: TrainingNotes | None = None) -> None:
         self.mic = mic
         self.wake = wake
         self.endpointer = endpointer
@@ -39,6 +49,10 @@ class VoiceLoop:
         self.people = people
         self.follow_up_s = follow_up_s
         self.show = show
+        self.notes = notes or TrainingNotes(None)
+        frames = max(1, int(self.WAKE_AUDIO_S * 1000 / endpointer.chunk_ms))
+        self._recent: deque[np.ndarray] = deque(maxlen=frames)
+        self._wake_audio: np.ndarray | None = None   # memory only, dropped after one turn
 
     def _quiet(self) -> None:
         """Wait for Orion to finish talking, then forget whatever the mic heard meanwhile."""
@@ -106,9 +120,19 @@ class VoiceLoop:
         self.show(f"Listening for '{wake_phrase}'. Ctrl+C to quit.")
         while True:
             frame = self.mic.read(timeout=1.0)
-            if frame is None or not self.wake.detect(frame):
+            if frame is None:
+                continue
+            self._recent.append(frame)
+            if not self.wake.detect(frame):
                 continue
             log.debug("Wake word score %.2f", self.wake.last_score)
+            self._wake_audio = np.concatenate(self._recent)
+            self._recent.clear()
+            if self.people is not None and self.people.store.is_empty():
+                # Introductions were skipped at startup; nobody can own Orion yet.
+                self.people.greet_on_start(self)
+                self.show(f"[waiting for '{wake_phrase}']")
+                continue
             # After each reply, keep listening briefly so a conversation doesn't
             # need the wake word on every line. Silence ends it.
             self.identity.start_conversation()
@@ -127,7 +151,12 @@ class VoiceLoop:
                 self.show("[no speech]")
             return False
 
-        user = self.identity.observe(heard.audio, heard.sample_rate, follow_up)
+        id_audio = heard.audio
+        if not follow_up and self._wake_audio is not None:
+            id_audio = np.concatenate([self._wake_audio, heard.audio])
+        self._wake_audio = None
+        user = self.identity.observe(id_audio, heard.sample_rate, follow_up)
+        del id_audio
         turn.extra["utterance_s"] = round(heard.seconds, 2)
         turn.extra["follow_up"] = follow_up
         turn.extra["speaker_known"] = user is not None
@@ -145,6 +174,8 @@ class VoiceLoop:
         mode_reply = profanity.handle_command(heard.text, self.assistant.profanity)
         if mode_reply:
             self.say(mode_reply)
+            return True
+        if feedback.handle(heard, self, user, self.notes, self.assistant.last_turn):
             return True
         if self.people is not None and self.people.handle(heard, self):
             return True

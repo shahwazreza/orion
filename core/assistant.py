@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from audio.tts import Speaker
 from brain.llm import Conversation, LLMBackend, LLMError
@@ -37,6 +38,8 @@ class Assistant:
         self.profanity = profanity or ProfanityPolicy("on")
         self.conversations: dict[str, Conversation] = {}
         self.last_metrics: dict | None = None
+        # Non-content facts about the last reply, for training notes. Never text.
+        self.last_turn: dict | None = None
 
     def may_swear(self, user: User | None) -> bool:
         """Only with people Orion knows, and only when no clean-mode reason applies."""
@@ -94,6 +97,18 @@ class Assistant:
             conversation.commit(user_text, reply)
         turn.extra["ok"] = bool(reply)
         self.last_metrics = self.metrics.record(turn, self.profile)
+        if reply:
+            self.last_turn = {
+                "mode": turn.mode,
+                "profile": self.profile,
+                "llm_model": getattr(self.llm, "model", None),
+                "language": "casual" if self.may_swear(user) else "clean",
+                "follow_up": bool(turn.extra.get("follow_up", False)),
+                "reply_chars": len(reply),
+                "reply_sentences": max(1, len(re.findall(r"[.!?](?:\s|$)", reply))),
+                "first_audio_s": self.last_metrics.get("first_audio_s"),
+                "llm_total_s": self.last_metrics.get("llm_total_s"),
+            }
         return reply or None
 
     def _say(self, text: str) -> None:

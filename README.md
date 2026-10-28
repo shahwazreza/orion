@@ -15,6 +15,9 @@ Jetson Orin Nano (aarch64, CUDA), with hardware choices in `config.yaml` profile
                                              small.en int8       llama3.2:3b                             British male voice
 ```
 
+**Using Orion:** see the [user manual](docs/user-manual.md) for every command,
+setting, and what to expect. This README is the developer overview.
+
 ## Design principles
 
 - **Private by default.** Nothing leaves the machine. Ollama must be on loopback,
@@ -115,7 +118,8 @@ Orion learns who you are instead of having a name configured:
   "add a new person" (owner only), "learn my voice" / "relearn my voice",
   "delete my profile" (asks to confirm).
 - **Terminal:** `python main.py users list`, `users rename OLD NEW`,
-  `users delete NAME` (type the name to confirm).
+  `users delete NAME` (type the name to confirm), `users relearn NAME` (voice
+  learning from the keyboard, for when Orion no longer recognises someone).
 - Text mode always acts as the owner, since it's your keyboard.
 
 **Privacy:** only voice embeddings (lists of numbers) are kept, never audio or
@@ -159,6 +163,23 @@ push notifications, commit messages, and anything written to files must go throu
 Measured on llama3.2:3b: with the examples given as earlier chat turns, Orion
 swears back 14 times out of 15 when you swear, and swears unprompted on a clean
 question 1 time in 9. Phase 10 fine-tuning should make his voice consistent.
+
+## Training notes (opt-in)
+
+Set `training_notes.enabled: true` to let Orion learn from mistakes. Say "that
+was wrong" after a bad answer and he logs the failure type plus an optional
+few-word note you give him ("too long", "should have asked first"). Misroutes and
+wrong tools will be logged automatically once Phase 2 adds the router and tools.
+
+- **No conversation content, ever.** Your question and his reply are not stored.
+  The only context kept is an allowlist of facts about the turn (mode, model,
+  language mode, reply length, latency), and the code rejects anything else.
+- Encrypted in `data/training_notes.enc` with the keyring key. The nuclear wipe
+  (Phase 2.5) deletes it.
+- Only people Orion recognises can add notes. View or clear them with
+  `python main.py notes list` and `python main.py notes clear`.
+- Phase 10 uses these notes only to decide which **synthetic** examples to
+  write. The notes themselves are never training data.
 
 ## Voices
 
@@ -325,5 +346,9 @@ update its URL, blank its hash, run the script, then pin the printed hash.
 - [ ] Phase 7: "Build me something" via sandboxed Claude Code
 - [ ] Phase 8: Orion's own allowlisted inbox
 - [ ] Phase 9: System control via fixed, validated tools under systemd
-- [ ] Phase 10: "Orion's voice": fine-tune the local model on Orion's personality,
-  including casual language
+- [ ] Phase 10: Fine-tuning for behaviour (last, after everything else works):
+  router classifier (measured accuracy and false-"general" privacy-leak rate),
+  tool calling, then Orion's voice. Synthetic or hand-written data only, in
+  `~/orion-training/` (survives the wipe, holds no personal data), LoRA via Unsloth
+  on Colab, exported to GGUF for Ollama, with base vs fine-tuned evaluation reports.
+  *(started: opt-in training notes)*

@@ -33,13 +33,20 @@ _NAME_LEAD = re.compile(
     r"(?:my name is|my name's|the name's|the name is|i'm|i am|im|call me|it's|it is|this is|you can call me)\s+",
     re.I,
 )
+# The same phrases anywhere in the sentence: "Hey Orion, my name is Reza" (which
+# Whisper may even hear as "Hey Ryan, ..."). Only the explicit ones, so "it's"
+# in "it's nice, I'm Reza" doesn't grab the wrong words.
+_NAME_ANYWHERE = re.compile(r"\b(?:my name is|my name's|the name's|the name is|call me|i'm|i am)\s+",
+                            re.I)
 _NOT_NAMES = {"yes", "no", "yeah", "nope", "okay", "ok", "hello", "hi", "hey", "thanks", "thank",
               "you", "sorry", "what", "nothing", "orion", "jarvis", "the", "a", "an"}
 
 
 def extract_name(text: str) -> str | None:
     """'My name is reza.' -> 'Reza'. Returns None if it doesn't look like a name."""
-    t = _NAME_LEAD.sub("", text.strip())
+    t = text.strip()
+    leads = list(_NAME_ANYWHERE.finditer(t))
+    t = t[leads[-1].end():] if leads else _NAME_LEAD.sub("", t)
     t = re.sub(r"[^A-Za-z' -]", " ", t)
     t = re.split(r"\b(?:and|but|nice|pleased|how)\b", t, maxsplit=1, flags=re.I)[0]
     words = [w.strip("'-") for w in t.split() if w.strip("'-")]
@@ -51,6 +58,10 @@ def extract_name(text: str) -> str | None:
 
 
 class People:
+    # People need longer to answer setup questions than a normal follow-up.
+    ANSWER_TIMEOUT_S = 10.0
+    SHORT_ANSWER_S = 2.5    # shorter answers get one "could you say a bit more?"
+
     def __init__(self, store: UserStore, identity: Identity, enroll_target_s: float = 10.0,
                  min_answer_s: float = 1.0, duplicate_voice_score: float = 0.7) -> None:
         self.store = store
@@ -80,9 +91,13 @@ class People:
         dialog.say(f"Orion online. Hello, {owner.name}." if owner and not dialog.hears_voice
                    else "Orion online.")
 
-    def meet(self, dialog: Dialog, first: bool = False) -> User | None:
-        """Learn a new person's name, then (with consent) their voice."""
-        name = self._ask_name(dialog, "What's your name?" if first else "Hello. What's your name?")
+    def meet(self, dialog: Dialog, first: bool = False, heard_name: str | None = None) -> User | None:
+        """Learn a new person's name, then (with consent) their voice.
+
+        ``heard_name`` is a name the person already offered ("my name is Reza").
+        """
+        name = self._ask_name(dialog, "What's your name?" if first else "Hello. What's your name?",
+                              candidate=heard_name)
         if name is None:
             dialog.say("No problem. We can do introductions another time.")
             return None
@@ -93,19 +108,35 @@ class People:
             dialog.say(f"Lovely. I'll learn your voice, {name}, next time we talk out loud.")
         return user
 
-    def _ask_name(self, dialog: Dialog, prompt: str, attempts: int = 3) -> str | None:
+    def _ask_name(self, dialog: Dialog, prompt: str, attempts: int = 3,
+                  candidate: str | None = None) -> str | None:
+        silent = 0
+        last: str | None = None     # the name Orion most recently suggested
         for _ in range(attempts):
-            heard = dialog.ask(prompt)
-            if heard is None:
-                return None
-            name = extract_name(heard.text)
+            if candidate is not None:
+                name, candidate = candidate, None
+            else:
+                heard = dialog.ask(prompt, timeout_s=self.ANSWER_TIMEOUT_S)
+                if heard is None:
+                    silent += 1
+                    if silent >= 2:
+                        return None
+                    prompt = "Sorry, I didn't hear anything. What's your name?"
+                    continue
+                # "Jimble, you got it right the first time": they're confirming the
+                # name Orion already suggested, not giving a new one.
+                if last and (last.lower() in heard.text.lower() or yes_no(heard.text) is True):
+                    return last
+                name = extract_name(heard.text)
             if name is None:
                 prompt = "Sorry, I didn't catch a name. Please say just your first name."
                 continue
             if self.store.find(name):
                 prompt = f"I already know someone called {name}. What should I call you instead?"
                 continue
-            answer = dialog.ask(f"Nice to meet you, {name}. Did I get your name right?")
+            last = name
+            answer = dialog.ask(f"Nice to meet you, {name}. Did I get your name right?",
+                                timeout_s=self.ANSWER_TIMEOUT_S)
             if answer is not None and yes_no(answer.text) is True:
                 return name
             prompt = "Sorry about that. Please say your name once more, slowly."
@@ -115,7 +146,8 @@ class People:
         """Ask consent, then enroll. Returns True if a voiceprint was saved."""
         question = ("Can I learn your voice, so I know it's you when you talk to me? "
                     "I keep a voice signature, never recordings, and you can ask me to forget it.")
-        answer = dialog.ask(f"{intro} {question}" if intro else f"Thanks, {user.name}. {question}")
+        answer = dialog.ask(f"{intro} {question}" if intro else f"Thanks, {user.name}. {question}",
+                            timeout_s=self.ANSWER_TIMEOUT_S)
         if answer is None or yes_no(answer.text) is not True:
             self.store.set_opt_out(user.id, True)
             dialog.say(f"Understood, {user.name}. If you change your mind, say: learn my voice.")
@@ -129,15 +161,19 @@ class People:
         for prompt in VOICE_PROMPTS:
             if total >= self.enroll_target_s:
                 break
-            heard = dialog.ask(prompt)
-            if heard is None or heard.audio is None:
-                continue
-            emb = self.identity.embed(heard.audio, heard.sample_rate)
-            if emb is None or heard.seconds < self.min_answer_s:
-                continue
-            samples.append(emb)
-            total += heard.seconds
-            del heard   # audio and text discarded right away
+            # One nudge per question: one-word answers ("Biryani.") carry too little voice.
+            for attempt in (prompt, "Could you say a bit more about that?"):
+                heard = dialog.ask(attempt, timeout_s=self.ANSWER_TIMEOUT_S)
+                if heard is None or heard.audio is None:
+                    break
+                emb = self.identity.embed(heard.audio, heard.sample_rate)
+                if emb is not None and heard.seconds >= self.min_answer_s:
+                    samples.append(emb)
+                    total += heard.seconds
+                long_enough = heard.seconds >= self.SHORT_ANSWER_S
+                del heard   # audio and text discarded right away
+                if long_enough or total >= self.enroll_target_s:
+                    break
 
         if total < self.enroll_target_s * 0.6:
             dialog.say(f"I didn't hear enough to learn your voice, {user.name}. "
@@ -186,8 +222,9 @@ class People:
                 dialog.say("I know " + _join(names) + ".")
             return True
 
-        if re.search(r"\b((add|enrol+|register|meet) (a )?(new )?(person|user|voice|profile|someone)"
-                     r"|learn (a )?new (voice|person)|meet someone new)\b", t):
+        if re.search(r"\b((add|enrol+|register|meet|learn) (a |an )?(new |another |one more )?"
+                     r"(person|user|voice|profile|member|someone|somebody|friend)"
+                     r"|meet someone new)\b", t):
             if user is None or not user.is_owner:
                 dialog.say("Only the owner can add new people. Ask them to say: add a new person.")
                 return True
@@ -197,9 +234,26 @@ class People:
                 self.identity.set_current(new)
             return True
 
+        m = re.search(r"\b(?:(?:re-?)?learn|re-?train|update|re-?enrol+) (\w[\w' -]*?)'s voice\b", t)
+        if m and m.group(1) not in ("my", "your"):
+            # The owner teaching Orion someone else's voice: the only way for a person
+            # with no voiceprint yet, since Orion can't recognise them to let them ask.
+            if user is None or not user.is_owner:
+                dialog.say("Only the owner can do that.")
+                return True
+            target = self.store.find(m.group(1))
+            if target is None:
+                dialog.say(f"I don't know anyone called {m.group(1).title()}.")
+                return True
+            dialog.say(f"Okay. {target.name}, come close and answer me.")
+            if self.enroll_voice(dialog, target):
+                self.identity.set_current(target)
+            return True
+
         if re.search(r"\b((re-?)?learn|re-?train|update|re-?enrol+) my voice\b", t):
             if user is None:
-                dialog.say("I'm not sure who you are. Tell me your name first: say, who am I.")
+                dialog.say("I don't recognise your voice yet, so I can't tell whose voice to "
+                           "learn. Ask the owner to say: learn, your name's, voice.")
                 return True
             self.enroll_voice(dialog, user)
             return True
@@ -210,6 +264,12 @@ class People:
             if name is None:
                 return False
             if user is None:
+                if self.store.is_empty():
+                    # Nobody set up yet (introductions were skipped): this person becomes the owner.
+                    new = self.meet(dialog, first=True, heard_name=name)
+                    if new is not None:
+                        self.identity.set_current(new)
+                    return True
                 dialog.say(f"Nice to meet you, {name}. If you'd like me to remember you, "
                            "ask the owner to say: add a new person.")
                 return True

@@ -53,6 +53,8 @@ def setup(vec=unit(1, 0, 0)):
 @pytest.mark.parametrize("text,name", [
     ("My name is reza.", "Reza"), ("I'm Sam", "Sam"), ("Hi, I'm Mary Jane.", "Mary Jane"),
     ("Reza", "Reza"), ("um, it's Ali, nice to meet you", "Ali"), ("call me Jo", "Jo"),
+    ("Hey Ryan, my name is Reza", "Reza"), ("Hey Orion, I'm Reza.", "Reza"),
+    ("Hello there Orion, my name's Sam Lee", "Sam Lee"),
     ("Yes", None), ("What's the weather like in London today", None), ("", None),
 ])
 def test_extract_name(text, name):
@@ -62,6 +64,8 @@ def test_extract_name(text, name):
 @pytest.mark.parametrize("text,expected", [
     ("Yes", True), ("yeah, go ahead", True), ("That's right.", True), ("Sure!", True),
     ("No", False), ("Nope, it's Sam", False), ("yes, no wait", False), ("Hmm", None),
+    ("I reckon", True), ("you got it right the first time", True), ("spot on", True),
+    ("that's not right", False),
 ])
 def test_yes_no(text, expected):
     assert yes_no(text) is expected
@@ -121,6 +125,15 @@ def test_only_owner_can_add_people():
     assert identity.current.id == sam.id
 
 
+@pytest.mark.parametrize("text", ["Orion, add another voice", "add a new person", "add someone",
+                                  "learn a new voice", "add another person please", "add a new member"])
+def test_add_person_phrasings(text):
+    store, identity, people = setup()
+    identity.set_current(None)
+    d = ScriptedDialog([])
+    assert people.handle(Heard(text), d) and "Only the owner" in d.said[0]
+
+
 def test_new_voice_that_matches_someone_else_needs_confirmation():
     store, identity, people = setup(unit(1, 0, 0))     # new person sounds exactly like Reza
     owner = store.add("Reza", [unit(1, 0, 0)])
@@ -163,3 +176,65 @@ def test_ordinary_questions_are_not_commands():
     _, _, people = setup()
     for text in ("what does my name mean", "who is the prime minister", "tell me about voices"):
         assert not people.handle(Heard(text), ScriptedDialog([]))
+
+
+def test_one_silence_gets_a_second_chance_two_give_up():
+    store, _, people = setup()
+    d = ScriptedDialog([None, "Reza", "yes", "no"])      # silent once, then answers
+    people.greet_on_start(d)
+    assert store.owner().name == "Reza"
+    assert "didn't hear anything" in " ".join(d.said)
+    store2, _, people2 = setup()
+    people2.greet_on_start(ScriptedDialog([None, None]))
+    assert store2.is_empty()
+
+
+def test_my_name_is_with_nobody_set_up_starts_introductions():
+    store, identity, people = setup()
+    d = ScriptedDialog(["yes", "no"])                    # confirm name, decline voice
+    assert people.handle(Heard("My name is Reza."), d)
+    assert store.owner().name == "Reza" and identity.current.name == "Reza"
+    assert not any("ask the owner" in s for s in d.said)
+
+
+def test_reply_that_repeats_the_suggested_name_confirms_it():
+    # The live session that failed: "I reckon" then "Jimble, you got it right the first time".
+    store, _, people = setup()
+    store.add("Reza")
+    d = ScriptedDialog(["I tumbled ya on", "Jimble", "hmm", "Jimble, you got it right the first time", "no"])
+    people.meet(d)
+    assert store.find("Jimble") is not None
+
+
+def test_short_answers_get_one_nudge_then_count():
+    store, _, people = setup()
+    u = store.add("Reza")
+    # "Biryani." (1 s) -> nudge -> longer answer; total 1 + 4 + 4 = 9 s >= 6 s target
+    d = ScriptedDialog([("Biryani.", 1.0), ("Chicken biryani with raita, every week", 4.0),
+                        ("Japan, for the trains and the food", 4.0)])
+    assert people.enroll_voice(d, u)
+    assert "Could you say a bit more about that?" in d.said
+    assert len(store.get(u.id).enrollment) == 3
+
+
+def test_owner_can_teach_someone_elses_voice():
+    store, identity, people = setup(unit(0, 1, 0))
+    owner = store.add("Reza", [unit(1, 0, 0)])
+    joe = store.add("Joe")
+    identity.set_current(owner)
+    d = ScriptedDialog([("I like grapes and crab and shrimp", 3.5), ("My room is a filthy mess", 3.5)])
+    assert people.handle(Heard("learn Joe's voice"), d)
+    assert store.get(joe.id).has_voice and identity.current.id == joe.id
+
+
+def test_only_owner_can_teach_someone_elses_voice_and_unknown_name():
+    store, identity, people = setup()
+    owner = store.add("Reza")
+    joe = store.add("Joe")
+    identity.set_current(joe)
+    d = ScriptedDialog([])
+    people.handle(Heard("learn Reza's voice"), d)
+    assert d.said == ["Only the owner can do that."]
+    identity.set_current(owner)
+    people.handle(Heard("learn Sam's voice"), d)
+    assert d.said[-1] == "I don't know anyone called Sam."
