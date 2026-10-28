@@ -25,3 +25,44 @@ LLM `llama3.2:3b` - Whisper `small.en` on cpu/int8 - Piper `en_GB-alan-medium`. 
 
 Transcripts exactly right: 10/10. Memory after run: Orion 973 MB, Ollama 2580 MB, system 9108/31686 MB used, swap 0 MB.
 Add `vad.end_silence_ms` (800 ms) for perceived latency in voice mode.
+
+## Voice recognition and end-of-speech detection
+
+Measured with `python scripts/voice_eval.py --librispeech .../LibriSpeech/dev-clean`
+(LibriSpeech dev-clean, 40 speakers, CC BY 4.0). Same models and code paths as Orion.
+These results led to the merged defaults: `people.threshold` 0.55 → 0.40,
+`vad.neg_threshold` 0.35, and `vad.end_silence_ms` 800 → 1000.
+
+### 2026-10-28 - voice evaluation (LibriSpeech dev-clean, seed 7)
+
+TitaNet-small, households of 3 enrolled people, command-length clips (1.2-3 s), 12 per speaker per condition. Cells: missed / mistaken for another member / stranger accepted, in %.
+
+| Condition | threshold 0.40 | threshold 0.45 | threshold 0.50 | threshold 0.55 |
+|---|---|---|---|---|
+| clean | 2.1 / 0.0 / 1.1 | 3.3 / 0.0 / 0.1 | 4.6 / 0.0 / 0.1 | 8.3 / 0.0 / 0.0 |
+| noisy | 4.3 / 0.0 / 1.0 | 11.6 / 0.0 / 0.3 | 16.9 / 0.0 / 0.1 | 29.0 / 0.0 / 0.0 |
+| far-field | 68.1 / 0.0 / 0.1 | 83.6 / 0.0 / 0.0 | 93.9 / 0.0 / 0.0 | 98.4 / 0.0 / 0.0 |
+
+End-of-speech on 200 far-field sentences:
+
+| Setting | Sentences cut off | Median delay after speech ends |
+|---|---|---|
+| Phase-1 (800 ms, no hysteresis) | 38.0% | 0.56 s |
+| voice-patch (1000 ms, hysteresis 0.35) | 15.0% | 0.79 s |
+
+**Reading the results:**
+
+- **0.40 is the right recognition threshold.** It misses 4% of noisy commands
+  instead of 29%. The cost is that about 1 stranger in 100 passes as a household
+  member, which is why trust-changing commands require `people.verify_threshold`
+  (0.55) on the request itself; no stranger reached that level here.
+- **No one was ever mistaken for another household member**, at any threshold.
+- **Far-field audio defeats TitaNet-small** at every threshold. The simulation
+  is harsh (synthetic reverb, -12 dB, 15 dB SNR), but it shows the limit: speak
+  within about a metre of the mic, or use a speakerphone. A larger embedding
+  model is the next thing to try.
+- **Hysteresis plus 1000 ms silence cuts early cut-offs from 38% to 15%** for
+  about 0.23 s of extra delay before Orion answers.
+- **Live check:** on the laptop with the mic at 100%, Reza scored 0.57 to 0.76
+  when recognised. Other voices peaked at about 0.39, consistent with 0.40 as
+  the cutoff.
