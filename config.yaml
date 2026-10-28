@@ -51,16 +51,27 @@ common:
     enabled: true
     model: nemo_en_titanet_small.onnx   # speaker embeddings, ~30 ms per utterance on CPU
     threads: 2
-    threshold: 0.55         # min cosine similarity to recognise someone; raise if it mixes people up
+    # Measured on 40 LibriSpeech speakers with noisy, partly far-field commands: your own
+    # voice often scores only 0.4-0.55 away from enrollment conditions, so 0.55 missed
+    # about 30% of commands; 0.40 misses about 8%. Strangers pass 0.40 for a given
+    # enrolled person about 1.4% of the time (vs 0.2% at 0.55).
+    threshold: 0.40         # min cosine similarity to recognise someone; raise if it mixes people up
     margin: 0.05            # best match must beat the runner-up by this much
     min_audio_s: 0.8        # shorter clips are too short to judge
-    adapt_threshold: 0.72   # confident matches refine the voiceprint over time
+    continuity_slack: 0.1   # in a follow-up, keep the current speaker down to threshold - slack
+    adapt_threshold: 0.72   # confident matches refine the voiceprint over time; lower lets
+                            # strangers' voices leak in (0.50 doubled false matches in tests)
+    adapt_min_audio_s: 2.0  # seconds of audio needed to learn from a match
     enroll_target_s: 10.0   # seconds of speech collected when learning a voice
 
   vad:
     threshold: 0.5
     start_timeout_s: 6.0    # give up if no speech starts after the wake word
-    end_silence_ms: 800     # this much silence ends the utterance
+    neg_threshold: 0.35     # once speaking, frames above this still count as speech (hysteresis)
+    # Pauses mid-sentence cut people off. Measured on noisy, far-field LibriSpeech:
+    # 800 ms (no hysteresis) cut 29% of sentences short, 1000 ms 12%, 1200 ms 6%.
+    # Each extra 200 ms is added to every reply's start. Lower it in a quiet room.
+    end_silence_ms: 1000    # this much silence ends the utterance
     max_utterance_s: 20.0
     pre_roll_ms: 240        # audio kept from just before speech onset
 

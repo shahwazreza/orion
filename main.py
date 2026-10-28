@@ -241,9 +241,11 @@ def make_identity(cfg, store, encoder):
     from core.identity import Identity
 
     p = cfg.section("people")
-    return Identity(store, encoder, threshold=p.get("threshold", 0.55), margin=p.get("margin", 0.05),
+    return Identity(store, encoder, threshold=p.get("threshold", 0.40), margin=p.get("margin", 0.05),
                     min_audio_s=p.get("min_audio_s", 0.8),
-                    adapt_threshold=p.get("adapt_threshold", 0.72))
+                    continuity_slack=p.get("continuity_slack", 0.1),
+                    adapt_threshold=p.get("adapt_threshold", 0.72),
+                    adapt_min_audio_s=p.get("adapt_min_audio_s", 2.0))
 
 
 def run_text(cfg, assistant, speaker, store, notes) -> None:
@@ -356,6 +358,7 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
             end_silence_ms=vad.get("end_silence_ms", 800),
             max_utterance_s=vad.get("max_utterance_s", 20.0),
             pre_roll_ms=vad.get("pre_roll_ms", 240),
+            neg_threshold=vad.get("neg_threshold"),
         )
         with timed("Whisper STT"):
             stt = make_stt(cfg.section("stt"), models_dir)

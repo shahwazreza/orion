@@ -60,3 +60,12 @@ def test_reset_clears_state_and_vad():
     ep.reset()
     assert ep.status is Status.WAITING and ep.audio().size == 0
     assert ep.score.resets == 2  # once in __init__, once now
+
+
+def test_soft_speech_after_onset_does_not_end_the_utterance():
+    # 0.4 is below the 0.5 start threshold but above the 0.35 "still speaking" one.
+    ep = make([0.9, 0.4, 0.4, 0.4, 0.4, 0.9, 0.0, 0.0, 0.0])
+    statuses = [ep.push(f) for f in frames(9)]
+    assert Status.DONE not in statuses[:6]
+    old = make([0.9, 0.4, 0.4, 0.4, 0.4, 0.9], neg_threshold=0.5)   # without hysteresis
+    assert Status.DONE in [old.push(f) for f in frames(6)]
