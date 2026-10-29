@@ -100,7 +100,7 @@ python scripts/download_models.py
 ollama pull llama3.2:3b
 ```
 
-The speech-recognition model (Whisper small.en, ~465 MB) downloads the first
+The speech-recognition model (Whisper medium.en, ~1.5 GB) downloads the first
 time you start voice mode. After that, Orion works with no internet at all.
 
 **KDE Wallet must be enabled** (System Settings → KDE Wallet). Orion keeps his
@@ -733,7 +733,7 @@ and the right one is picked automatically. Restart Orion after changing anything
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `stt.model` | `small.en` | Whisper model. `small.en` is the best speed/accuracy balance on the laptop |
+| `stt.model` | `medium.en` (laptop) | Whisper model. `medium.en` is more accurate in noise; `small.en` is about 3 s faster per utterance |
 | `stt.device` | `auto` | `auto`, `cpu`, or `cuda` |
 | `stt.language` | `en` | English |
 

@@ -188,7 +188,8 @@ profiles:
 
   laptop:
     stt:
-      model: small.en
+      model: medium.en      # ~4.6 s/utterance vs 1.5 s for small.en, ~25% fewer errors in noise
+                            # (docs/benchmarks.md, Whisper sizes). small.en if speed matters more.
       device: cpu
       compute_type: int8
       cpu_threads: 4

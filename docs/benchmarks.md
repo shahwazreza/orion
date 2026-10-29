@@ -112,3 +112,20 @@ Live: "Who won the 2025 Nobel Prize in Physics?" → read NobelPrize.org, answer
 the source named. Known weakness: the 3B model sometimes misreads pages (asked for the newest
 Python, it answered with the in-development branch). The answer step now uses only pages
 actually read (it had trusted a third-party snippet over python.org).
+
+## Whisper model size (laptop, 2026-10-29)
+
+24 LibriSpeech dev-clean clips (2-7 s, seed 3), each clean and with 10 dB noise; faster-whisper
+int8 on CPU, 4 threads, greedy decoding. Time is per utterance.
+
+| Model | Median | p90 | WER clean | WER noisy |
+|---|---|---|---|---|
+| `small.en` | 1.48 s | 1.66 s | 8.7% | 10.1% |
+| `medium.en` | 4.58 s | 5.33 s | 7.7% | 7.5% |
+| `large-v3-turbo` | 7.97 s | 9.59 s | 6.6% | 7.9% |
+| `distil-large-v3` | 8.16 s | 10.37 s | 9.5% | 11.2% |
+
+Turbo's small decoder doesn't help on a CPU: its 32-layer encoder dominates. The laptop profile
+now uses `medium.en` (fewer errors in noise, ~3 s slower); the Jetson should run `large-v3-turbo`
+on its GPU. ~400 words in total, so differences of 1-2% are a handful of words; the speed gaps
+are the reliable part.
