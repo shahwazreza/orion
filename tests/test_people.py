@@ -331,3 +331,48 @@ def test_everyday_people_commands_are_not_gated():
     d = ScriptedDialog([])
     people.handle(Heard("who am I"), d)
     assert d.said == ["You're Reza."]
+
+
+@pytest.mark.parametrize("heard", ["Delete by", "Hey Jarvis, do lead bye.", "delete buy", "delete Bye"])
+def test_misheard_names_and_verbs_still_find_the_person(heard):
+    # Live: the profile "Bye" was transcribed as "by" / "do lead bye".
+    store, identity, people = setup()
+    owner, bye = store.add("Reza"), store.add("Bye")
+    speaking(identity, owner)
+    d = ScriptedDialog(["yes"])
+    assert people.handle(Heard(heard), d)
+    assert "Delete Bye's name and voiceprint" in d.said[0]
+    assert store.get(bye.id) is None
+
+
+def test_close_names_are_confirmed_not_silently_acted_on():
+    store, identity, people = setup()
+    owner, joe = store.add("Reza"), store.add("Joe")
+    speaking(identity, owner)
+    people.handle(Heard("delete Jo"), ScriptedDialog(["no"]))
+    assert store.get(joe.id) is not None                  # asked "Delete Joe's...?", answer no
+    assert not people.handle(Heard("delete the milk"), ScriptedDialog([]))
+
+
+@pytest.mark.parametrize("text", [
+    "Can you list all the people you know?", "who do you know", "Tell me everyone you know",
+    "Name all the users", "Which people have you met?", "list the profiles", "who else do you know",
+])
+def test_listing_people_phrasings(text):
+    store, identity, people = setup()
+    reza = store.add("Reza")
+    store.add("Malihah")
+    speaking(identity, reza, 0.54)
+    d = ScriptedDialog([])
+    assert people.handle(Heard(text), d)
+    assert d.said == ["I know Reza and Malihah."]
+
+
+@pytest.mark.parametrize("heard", ["delete the user by", "delete the person called Bye",
+                                   "remove the profile bye", "delete someone named Bye"])
+def test_delete_with_filler_words(heard):
+    store, identity, people = setup()
+    owner, bye = store.add("Reza"), store.add("Bye")
+    speaking(identity, owner)
+    people.handle(Heard(heard), ScriptedDialog(["yes"]))
+    assert store.get(bye.id) is None

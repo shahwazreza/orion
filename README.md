@@ -5,7 +5,9 @@ assistant. Speech recognition, language model, and speech synthesis all run on t
 device. The same code runs on an x86_64 Fedora laptop (CPU only) and an NVIDIA
 Jetson Orin Nano (aarch64, CUDA), with hardware choices in `config.yaml` profiles.
 
-> Status: **Phase 1, voice loop**, plus learning people and recognising their voices.
+> Status: **Phase 1 complete:** voice loop, learning people and recognising their voices,
+> barge-in, honest answers about what Orion can't do yet. **Phase 6 in progress:** custom
+> "hey orion" wake word (training notebook ready).
 > Wake word → listen → who's speaking? → transcribe → reply → speak.
 
 ```
@@ -17,6 +19,11 @@ Jetson Orin Nano (aarch64, CUDA), with hardware choices in `config.yaml` profile
 
 **Using Orion:** see the [user manual](docs/user-manual.md) for every command,
 setting, and what to expect. This README is the developer overview.
+
+**Honest about limits:** requests that need data Orion doesn't have yet (weather,
+email, calendar, news, prices, scores, alarms) get a fixed "I can't do that yet,
+and I won't guess" before the model sees them (`brain/capabilities.py`). A live test
+caught the 3B model inventing a forecast despite its instructions.
 
 ## Design principles
 
@@ -40,16 +47,20 @@ main.py              entry point: voice mode, text mode, device listing
 config.yaml          common settings + per-device profiles (laptop, jetson, ...)
 core/                config & profile detection, hardware probe, metrics, network
                      guard, turn orchestration, voice loop, identity (who's speaking),
-                     people (onboarding + people commands), dialog helpers
+                     people (onboarding + people commands), barge-in, feedback
+                     ("that was wrong"), dialog helpers
 audio/               mic, wake word, VAD/endpointing, STT, speaker recognition,
                      TTS (Kokoro, Piper) + pipelined playback + chimes
-brain/               LLM backends + history, persona prompt, speech text cleanup
-storage/             encrypted JSON files (AES-GCM), user store
+brain/               LLM backends + history, persona prompt, speech text cleanup,
+                     language modes (profanity), capability guard (honest "can't yet")
+storage/             encrypted JSON files (AES-GCM), user store, training notes
 security/            data key in the system keyring
 tools/               placeholder for Phase 2+
-scripts/             download_models.py (hash-pinned), bench.py
+scripts/             download_models.py (hash-pinned), bench.py (latency), voice_eval.py
+                     (speaker recognition + endpointing on LibriSpeech), wakeword_test.py
+notebooks/           train_hey_orion.ipynb: Colab training for the custom wake word
 tests/               pytest suite (no models or audio hardware needed)
-docs/benchmarks.md   measured latency and memory per device and phase
+docs/                user-manual.md, wake-word.md, benchmarks.md (measured results)
 ```
 
 ## Setup: Fedora laptop
@@ -123,8 +134,10 @@ Orion learns who you are instead of having a name configured:
   history per person. Unknown voices get answers without a name, and he won't
   list who he knows to a stranger.
 - **Voice commands:** "who am I?", "who do you know?", "call me ...",
-  "add a new person" (owner only), "learn my voice" / "relearn my voice",
-  "delete my profile" (asks to confirm).
+  "learn my voice" / "relearn my voice", "delete my profile". Owner only:
+  "add a new person", "learn *Joe*'s voice", "delete *Joe*". Changes always ask
+  to confirm. Names are matched the way Whisper spells them ("delete by" finds
+  "Bye"), and the name is always repeated back first.
 - **Terminal:** `python main.py users list`, `users rename OLD NEW`,
   `users delete NAME` (type the name to confirm), `users relearn NAME` (voice
   learning from the keyboard, for when Orion no longer recognises someone).
@@ -208,7 +221,10 @@ Samples of every voice saying the same line are generated into `voice-samples/`
 (git-ignored).
 
 The wake word is temporarily **"hey jarvis"** (openWakeWord's pretrained model).
-Phase 6 trains a custom "hey orion" model and swaps it in with one config line.
+To train and switch to **"hey orion"**, see [docs/wake-word.md](docs/wake-word.md):
+a Colab notebook trains it, `scripts/wakeword_test.py` checks it on your voice, and
+`wakeword.models` can run both during the switch. The wake phrase is stripped from
+what you say, so the model never sees "Hey Jarvis, ..." and corrects you.
 
 ## Configuration and profiles
 
@@ -239,8 +255,9 @@ python scripts/bench.py --runs 2 --write
 Laptop (i5-10th gen, CPU only), Phase 1 with the Piper voice: **about 3.2 s from
 end of speech to first audio** (STT 1.4 s, LLM first token 0.46 s), with 10/10
 transcripts correct. With the Kokoro voice, add about 2.5 s on this CPU.
-Memory: Orion about 1.0 GB, Ollama about 2.6 GB. Voice mode adds the 0.8 s silence
-window that decides you've finished talking (`vad.end_silence_ms`).
+Memory: Orion about 1.0 GB, Ollama about 2.6 GB. Voice mode adds the 1.0 s silence
+window that decides you've finished talking (`vad.end_silence_ms`; it was 0.8 s when
+the latency above was measured).
 
 Optimizations made, each one measured:
 
@@ -276,7 +293,15 @@ No models, microphone, or keyring are needed: everything is faked. The tests cov
   file permissions), owner hand-over, voiceprint adaptation limits
 - speaker matching (threshold, refusing near-ties, continuity in follow-ups)
 - onboarding and people commands: name extraction, yes/no, consent, too little
-  speech, owner-only adding, look-alike voices, rename/delete confirmations
+  speech, owner-only adding, look-alike voices, rename/delete confirmations,
+  misheard names, the strong-match safeguard for trust-changing commands
+- barge-in: wake-word and voice triggers, echo rejection, stopping speech and
+  generation mid-reply, echo transcripts
+- the capability guard: live/personal-data requests refused honestly, ordinary
+  questions still answered
+- language modes and the scrub filter; training notes (opt-in, no content, whitelist)
+- wake words: phrase stripping (incl. Whisper's mishearings), several models with
+  per-model thresholds
 
 ## Updating dependencies
 
@@ -356,7 +381,8 @@ update its URL, blank its hash, run the script, then pin the printed hash.
 - [ ] Phase 3: Outlook mail and calendar (Microsoft Graph, device code flow, read-only)
 - [ ] Phase 4: Alarms and morning briefing
 - [ ] Phase 5: Local meeting notes
-- [ ] Phase 6: Custom "hey orion" wake word
+- [ ] Phase 6: Custom "hey orion" wake word *(Colab training notebook, voice test script,
+  multi-model wake words ready: see [docs/wake-word.md](docs/wake-word.md); waiting on a trained model)*
 - [ ] Phase 7: "Build me something" via sandboxed Claude Code
 - [ ] Phase 8: Orion's own allowlisted inbox
 - [ ] Phase 9: System control via fixed, validated tools under systemd

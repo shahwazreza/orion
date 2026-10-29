@@ -86,4 +86,4 @@ def test_real_config_loads_for_every_profile():
     for name in ("laptop", "jetson"):
         cfg = load_config(profile=name, probe=LAPTOP)
         assert cfg.get("llm.host").startswith("http://127.0.0.1")
-        assert cfg.get("wakeword.model")
+        assert cfg.get("wakeword.models")

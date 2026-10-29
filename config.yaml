@@ -35,8 +35,12 @@ common:
     chimes: true            # audible cue when Orion starts/stops recording you
 
   wakeword:
-    model: hey_jarvis       # built-in name, or a path to a custom .onnx (Phase 6: hey_orion)
+    # Built-in names or paths to custom .onnx models; any of them wakes Orion.
+    # After training (docs/wake-word.md):  models: [models/openwakeword/hey_orion.onnx, hey_jarvis]
+    models: [hey_jarvis]
+    phrase: null            # what Orion tells people to say; null = the first model's name
     threshold: 0.5
+    thresholds: {}          # per-model overrides, e.g. {hey_orion: 0.6}
     cooldown_s: 1.5         # ignore re-triggers right after a detection
 
   conversation:
