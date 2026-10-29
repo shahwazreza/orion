@@ -154,10 +154,12 @@ class Conversation:
         self.system_prompt = system_prompt
         self.max_turns = max_turns
         self.examples: list[Message] = []   # few-shot turns, shown before the real history
+        self.context: str = ""              # per-turn extra system context (memories, past talk)
         self._turns: list[Message] = []
 
     def messages_with(self, user_text: str) -> list[Message]:
-        return [{"role": "system", "content": self.system_prompt}, *self.examples, *self._turns,
+        system = self.system_prompt + (f"\n{self.context}" if self.context else "")
+        return [{"role": "system", "content": system}, *self.examples, *self._turns,
                 {"role": "user", "content": user_text}]
 
     def commit(self, user_text: str, reply: str) -> None:

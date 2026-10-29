@@ -44,7 +44,7 @@ common:
     cooldown_s: 1.5         # ignore re-triggers right after a detection
 
   conversation:
-    follow_up_s: 6.0        # after a reply, listen this long without the wake word; 0 = off
+    follow_up_s: 10.0       # after a reply, listen this long without the wake word; 0 = off
     barge_in: wake_word     # interrupt Orion while he talks: wake_word ("hey jarvis") | voice | off.
                             # voice (just talk over him) needs echo cancellation; through laptop
                             # speakers his echo and room noise set it off (measured 2026-10-28).
@@ -78,8 +78,10 @@ common:
     # Pauses mid-sentence cut people off. Measured on noisy, far-field LibriSpeech:
     # 800 ms (no hysteresis) cut 29% of sentences short, 1000 ms 12%, 1200 ms 6%.
     # Each extra 200 ms is added to every reply's start. Lower it in a quiet room.
-    end_silence_ms: 1000    # this much silence ends the utterance
-    max_utterance_s: 20.0
+    # 5 s lets you pause to think mid-sentence; Orion waits that long after you
+    # stop before answering.
+    end_silence_ms: 5000    # this much silence ends the utterance
+    max_utterance_s: 60.0   # longest single recording
     pre_roll_ms: 240        # audio kept from just before speech onset
 
   stt:
@@ -115,6 +117,35 @@ common:
       voice: en_GB-alan-medium  # also downloaded: en_GB-northern_english_male-medium, en_GB-semaine-medium
       speaker_id: null      # multi-speaker voices only, e.g. semaine: 1 = spike, 2 = obadiah
       length_scale: 1.0     # >1 slower speech, <1 faster
+
+  cloud:                    # Claude mode (only when you ask: "ask Claude...", "switch to Claude mode")
+    enabled: true
+    model: claude-opus-5-5
+    effort: low             # short spoken replies; Opus 5.5 always thinks, effort sets how much
+    max_tokens: 4096        # includes thinking
+    fallbacks: true         # server-side refusal fallbacks (a declined request is retried)
+    timeout_s: 60
+  search:                   # web search when Orion needs current or unknown information
+    enabled: true           # false = offline mode (or say "Orion, don't search")
+    backend: searxng        # searxng (local container: scripts/searxng.sh start) | brave
+    searxng_url: http://127.0.0.1:8888   # must be loopback
+    max_rounds: 3           # search -> read -> search again, at most this many times
+    page_chars: 2500        # text kept from each page read (fits the local model)
+    cache_s: 900            # repeat searches within 15 minutes use the cached results
+  router:
+    auto: false             # true: plain general-knowledge questions with nothing personal go to Claude
+
+  memory:
+    enabled: true           # "remember that..." facts, per person, encrypted, never expire
+  conversations:
+    enabled: true           # every exchange saved per person (encrypted); strangers never
+    keep_days: null         # null = keep forever; e.g. 365 to delete older conversations
+  rules:
+    enabled: true           # "whenever X, do Y" standing instructions, per person
+  embeddings:
+    model: nomic-embed-text # local, via Ollama; matches memories/conversations/rules by meaning
+  backups:
+    keep: 30                # daily encrypted backups of data/orion.db
 
   training_notes:
     enabled: false          # opt-in: "that was wrong" logs the failure type and an optional

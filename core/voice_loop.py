@@ -54,6 +54,12 @@ class VoiceLoop:
         self.notes = notes or TrainingNotes(None)
         self.barge_in = barge_in
         self.wake_phrases = wake_phrases or ["hey jarvis"]
+        self.memory_commands = None          # core.memory.MemoryCommands, set by main
+        self.conversation_commands = None    # core.conversations.ConversationCommands
+        self.rule_commands = None            # core.rules.RuleCommands
+        self.rules = None                    # core.rules.RuleBook (checked after each reply)
+        self.router = None                   # core.router.Router (local vs Claude)
+        self.audit = None                    # storage.audit.AuditLog
         self._prefill: list[np.ndarray] = []   # user speech captured by a barge-in
         frames = max(1, int(self.WAKE_AUDIO_S * 1000 / endpointer.chunk_ms))
         self._recent: deque[np.ndarray] = deque(maxlen=frames)
@@ -175,6 +181,8 @@ class VoiceLoop:
         user = self.identity.observe(id_audio, heard.sample_rate, follow_up,
                                      unreliable=getattr(self, "_heard_over_orion", False))
         del id_audio
+        if not follow_up and self.conversation_commands is not None:
+            self.conversation_commands.log.start_conversation(user)
         turn.extra["utterance_s"] = round(heard.seconds, 2)
         turn.extra["follow_up"] = follow_up
         turn.extra["speaker_known"] = user is not None
@@ -201,17 +209,43 @@ class VoiceLoop:
         if mode_reply:
             self.say(mode_reply)
             return True
+        # Before training-notes feedback: "that was wrong" right after a reminder corrects the rule.
+        if self.rule_commands is not None and self.rule_commands.handle(heard, self, user):
+            return True
+        from core.web_search import handle_command as web_command
+
+        web_reply = web_command(heard.text, self.assistant.web, show=lambda s: log.info("%s", s))
+        if web_reply:
+            self.say(web_reply)
+            return True
         if feedback.handle(heard, self, user, self.notes, self.assistant.last_turn):
             return True
         if self.people is not None and self.people.handle(heard, self):
             return True
+        if self.memory_commands is not None and self.memory_commands.handle(heard, self, user):
+            return True
+        if self.conversation_commands is not None and self.conversation_commands.handle(heard, self, user):
+            return True
 
+        decision = self._route(heard.text, user)
+        if decision is not None and decision.handled:
+            return True
         if self.barge_in is not None:
             self.barge_in.start()
         try:
-            self.assistant.respond(heard.text, turn, self.identity.current)
+            if decision is not None and decision.route == "cloud":
+                self._chime("cloud")          # audible every time a request leaves the computer
+                self.assistant.respond_cloud(decision.text, turn, user, decision,
+                                             session=self.router.in_claude_mode(user.id if user else "guest"))
+            else:
+                self.assistant.respond(heard.text if decision is None else decision.text or heard.text,
+                                       turn, self.identity.current)
         finally:
             interrupted = self.barge_in.stop() if self.barge_in is not None else None
+        if not interrupted and self.rules is not None:
+            for rule in self.rules.check(user, heard.text):
+                turn.extra["rule_fired"] = True
+                self.speaker.say(rule.spoken_action())
         if interrupted:
             turn.extra["barge_in"] = interrupted
             self.speaker.wait()
@@ -222,6 +256,24 @@ class VoiceLoop:
             return True
         self._quiet()
         return True
+
+    def _route(self, text: str, user):
+        """Local or Claude for this request; mode switches are announced out loud."""
+        if self.router is None:
+            return None
+        key = user.id if user else "guest"
+        was_cloud = self.router.in_claude_mode(key)
+        decision = self.router.decide(text, key)
+        if self.audit is not None:
+            self.audit.record("route", route=decision.route, reason=decision.reason,
+                              person=user.id if user else None)
+        if was_cloud and not self.router.in_claude_mode(key):
+            self.assistant.end_cloud_session(user)
+        if decision.announce:
+            if decision.handled and decision.route == "cloud":
+                self._chime("cloud")
+            self.say(decision.announce)
+        return decision
 
     def _sampling_echo(self):
         """While Orion talks at startup, sample how his voice sounds through this

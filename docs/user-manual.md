@@ -1,6 +1,6 @@
 # Orion user manual
 
-**Version:** Phase 1 (voice loop, people, language modes, training notes), October 2026.
+**Version:** Phase 2 (memory, conversations, rules, Claude mode, web search) on top of Phase 1, October 2026.
 
 Orion is a private voice assistant that runs entirely on your own computer.
 You talk to him; he listens, works out who you are, thinks with a local language
@@ -25,6 +25,9 @@ details (architecture, tests, benchmarks), see the [README](../README.md).
 10. [Demo mode](#10-demo-mode)
 11. [Choosing Orion's voice](#11-choosing-orions-voice)
 12. [Training notes (opt-in)](#12-training-notes-opt-in)
+12a. [Memory, conversations and rules](#12a-memory-conversations-and-rules)
+12b. [Claude mode](#12b-claude-mode)
+12c. [Web search](#12c-web-search)
 13. [Terminal command reference](#13-terminal-command-reference)
 14. [Settings reference](#14-settings-reference)
 15. [Your privacy: what's stored and where](#15-your-privacy-whats-stored-and-where)
@@ -48,15 +51,17 @@ details (architecture, tests, benchmarks), see the [README](../README.md).
   the local model (llama3.2:3b on the laptop).
 - Swear back casually when you swear, or keep it clean when asked.
 - Note his mistakes when you tell him "that was wrong" (opt-in).
+- **Remember things permanently** ("remember that...") and **remember your conversations**,
+  even after a restart.
+- **Standing instructions:** "whenever I say I'm leaving, remind me to take my keys".
+- **Look things up on the web** when he doesn't know, and say where the answer came from.
+- **Ask Claude** for you, only when you say so, with nothing personal sent unless you allow it.
 - Run in text mode, where you type instead of talk.
 
 **He can't yet** (these come in later phases):
 
 | Not yet | Coming in |
 |---|---|
-| Use the internet, Claude, or look things up | Phase 2 |
-| Remember facts about you between sessions ("remember that...") | Phase 2 |
-| Standing rules ("whenever I say I'm leaving, remind me...") | Phase 2 |
 | Shut down by voice, nuclear wipe | Phase 2.5 |
 | Read your email or calendar | Phase 3 |
 | Alarms, morning briefing | Phase 4 |
@@ -167,14 +172,15 @@ can read.
 
 ### A conversation, step by step
 
-1. Say **"hey jarvis"**. *(A placeholder. To train and switch to "hey orion", see
-   [wake-word.md](wake-word.md).)*
+1. Say **"hey jarvis"**. *(A placeholder. A custom "hey orion" is trained with a Colab
+   notebook, tested on your voice with `scripts/wakeword_test.py`, and switched on in
+   `config.yaml`; both can work during the changeover. See [wake-word.md](wake-word.md).)*
 2. You hear a **rising chime**: he's recording.
-3. Speak normally. When you pause for about a second, a **falling chime** means
+3. Speak normally. When you stop for about 5 seconds, a **falling chime** means
    he's stopped recording.
 4. He answers.
 5. You hear a **soft single note**: he's still listening. Ask a follow-up
-   without the wake word, within 6 seconds.
+   without the wake word, within 10 seconds.
 6. To end, stay silent or say something like **"thanks, that's all"**. You hear
    the falling chime and he goes back to waiting for "hey jarvis".
 
@@ -223,10 +229,11 @@ or just "thanks" / "thank you" on its own.
 ### Tips
 
 - Wait for the rising chime before speaking. Words said during the chime may be cut.
-- He stops listening after about a second of silence. If he cuts you off
+- He stops listening after about 5 seconds of silence, so you can pause to think
+  mid-sentence. The cost is a 5-second wait before he answers. If he cuts you off
   mid-sentence, see section 17.
 - He waits up to 6 seconds for you to start talking after the wake word, and
-  records at most 20 seconds in one go.
+  records at most 60 seconds in one go.
 - **You can interrupt him:** say **"hey jarvis"** while he's talking. He stops
   within a moment and listens. See [Interrupting Orion](#interrupting-orion).
 - Answers are short on purpose (one to three sentences). Ask for more detail
@@ -477,6 +484,142 @@ get written for training; the notes themselves are never used as training data.
 
 ---
 
+## 12a. Memory, conversations and rules
+
+Everything here is **per person** (yours are yours, Malihah's are hers), **encrypted**
+in `data/orion.db`, and only ever used by the **local** model. Strangers' voices get
+nothing saved.
+
+### Memory: things you ask him to remember
+
+| Say | What happens |
+|---|---|
+| "Remember that my sister's name is Sara" / "Don't forget I'm allergic to peanuts" | Saved permanently. He says "Got it. I'll remember that..." |
+| "By the way, my birthday is March 3rd" / "I live in Tampa" / "I'm vegetarian" | Lasting facts like these are saved too, with the same confirmation |
+| "What do you remember about me?" | The latest five things you've told him |
+| "What do you know about my sister?" / "What did I tell you about my exam?" | Found by meaning. If no saved fact matches, he checks your past conversations |
+| "Forget about my sister" | Finds the closest memory and asks "Forget that...?" first |
+| "Forget everything you know about me" | Asks first. Your rules and conversations stay |
+
+Memories never expire. When you ask something they're relevant to ("can I eat this
+peanut butter sandwich?"), he uses them in his answer.
+
+### Conversations
+
+Every exchange is saved, so he picks up where you left off after a restart.
+
+| Say | What happens |
+|---|---|
+| "What did we talk about yesterday?" / "...today?" / "...on Monday?" / "...last week?" | A short summary of that day |
+| "What did I say about my exam?" / "Did I ever mention Jupiter?" | Finds the past exchange by meaning |
+| "Don't save this conversation" / "Off the record" | This conversation stops being saved, and what was said so far is dropped |
+| "Forget today's conversation" | Deletes today's, after asking |
+| "Delete my conversation history" | Deletes all of yours, after asking. Memories and rules stay |
+
+Kept forever unless you set `conversations.keep_days`.
+
+### Standing instructions (rules)
+
+| Say | What happens |
+|---|---|
+| "Whenever I say I'm leaving my room, remind me to take my keys" | Saved. He confirms in his own words |
+| "Every time I'm going to bed, remind me to drink water" / "Always remind me to stretch when I finish class" | Also understood |
+| "What rules do I have?" | Lists them |
+| "Change the keys rule to also include my wallet" | Reads the new version back and asks first |
+| "Stop reminding me about my keys" | Asks first, then deletes |
+| "That was wrong" (right after a reminder) | That phrase won't trigger the rule again |
+| "Also remind me when I say see ya" | Adds your own phrase to the rule |
+
+Rules work by meaning: "heading out", "I'm off" and "leaving now" all count as
+leaving. He ignores questions ("how do I leave a group chat?"), other people ("my
+roommate left") and plans ("I'll leave in an hour"). He'll occasionally get it wrong;
+the two corrections above teach him.
+
+Deleting memories, conversations or rules needs a clear voice match on that request,
+like the people commands (section 8).
+
+## 12b. Claude mode
+
+Orion answers on this computer by default. Claude (Anthropic's cloud model) is used
+**only when you ask**:
+
+| Say | What happens |
+|---|---|
+| "Ask Claude what causes the northern lights" | Just that one question goes to Claude, then back to local |
+| "Switch to Claude mode" | Everything goes to Claude until you say "back to local" |
+| "Back to local" / "Local mode" | Back on this computer |
+| "Ask Claude to plan my week, **and include what you know about my schedule**" | Only then are your matching memories sent, for that request only |
+
+- You hear a **three-note rising chime** before every request that goes to the cloud.
+- **Never sent** unless you say "include...": your memories, conversations, rules, or
+  anyone's name, including yours.
+- If the internet, the API, or your key isn't working, he says so and answers himself.
+- Each person has their own Claude mode. Turning it on for you doesn't affect Malihah.
+
+**Setup:**
+
+1. Create a key in the [Claude Console](https://platform.claude.com) (Settings → API Keys;
+   it starts with `sk-ant-` and is shown only once) and add a little credit.
+2. **Copy it**, then save it straight from the clipboard (no hidden prompt to paste into):
+   ```bash
+   python main.py secrets set anthropic --clipboard
+   ```
+   It says "Saved to the system keyring (N characters)" and clears the clipboard.
+   Without `--clipboard` it asks with hidden input instead (paste with Ctrl+Shift+V).
+3. Check: `python main.py secrets status` should say `anthropic  saved (N characters)`.
+   Empty or malformed keys are refused, and reported as "not set".
+
+**Set a monthly spend limit (about $10)**
+in the Claude Console under Settings → Limits. A spoken turn costs about one cent.
+
+**Auditing:** `python main.py audit` shows every routing decision and every cloud
+request exactly as sent, with tokens and estimated cost, plus this month's total.
+
+The optional auto-router (`router.auto: true`, off by default) sends plain
+general-knowledge questions with nothing personal in them ("what causes the northern
+lights?") to Claude automatically.
+
+## 12c. Web search
+
+When Orion doesn't know something, or it's about now (news, prices, scores, "who
+won", "the latest...", recent years), he searches instead of guessing:
+
+1. He searches, reads the top pages, and searches again if needed (at most 3 rounds).
+2. He answers in his own words and says where it came from: *"According to
+   NobelPrize.org, ..."*. He never reads out links.
+3. If sources disagree or nothing reliable turns up, he says so.
+
+| Say | What happens |
+|---|---|
+| "Look up ..." / "Search for ..." | Searches straight away |
+| "What were your sources?" | Names the sites. Text mode also shows the full links |
+| "Orion, don't search" | No web access until "you can search again" |
+
+For big research questions ("compare...", "pros and cons of...") or when he can't find
+it, he offers: *"This is a big one. Want me to ask Claude?"* Claude then searches too
+(counted toward your spend limit).
+
+**Privacy:** searches leave this computer, so names of people Orion knows and details
+from your memories are kept out of queries unless you said them yourself in that
+question. Before searching for a known person's name, he asks. Every query and every
+page he reads is in the encrypted audit log.
+
+**Safety:** web pages are only information. Nothing on a page can make Orion
+remember, set rules, delete, send, or change modes. He also won't fetch addresses on
+your own network.
+
+**Setup:** web search uses a local search engine (SearXNG) in a container that only
+this computer can reach. Start it once after each reboot:
+
+```bash
+scripts/searxng.sh start      # also: stop | status | logs
+```
+
+If it isn't running, Orion still works and says search is unavailable. For Brave
+Search instead: `search.backend: brave` and `python main.py secrets set brave --clipboard`
+(a free Brave Search API key; not needed with SearXNG).
+Offline mode: `search.enabled: false`.
+
 ## 13. Terminal command reference
 
 Run these from `~/orion` with the environment active.
@@ -503,6 +646,17 @@ Run these from `~/orion` with the environment active.
 | `python main.py users rename OLD NEW` | Rename someone |
 | `python main.py users delete NAME` | Delete someone (type their name to confirm) |
 | `python main.py users relearn NAME` | Learn someone's voice again, started from the keyboard. Use this if Orion stops recognising you (stop Orion first) |
+
+### Keys and audit
+
+| Command | Purpose |
+|---|---|
+| `python main.py secrets set anthropic --clipboard` | Save your Claude API key from the clipboard (recommended), then clear the clipboard |
+| `python main.py secrets set anthropic` | Same, typed or pasted at a hidden prompt |
+| `python main.py secrets set brave --clipboard` | Brave Search key (only if `search.backend: brave`) |
+| `python main.py secrets status` | Which keys are saved and their length; flags empty or malformed keys. Never shows them |
+| `python main.py audit [N]` | The last N routing decisions, cloud requests, searches and pages read, plus this month's Claude cost |
+| `scripts/searxng.sh start\|stop\|status\|logs` | The local search engine |
 
 ### Training notes
 
@@ -556,11 +710,11 @@ and the right one is picked automatically. Restart Orion after changing anything
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `conversation.follow_up_s` | `6.0` | Seconds he waits for a follow-up; `0` = wake word every time |
-| `vad.end_silence_ms` | `1000` | Silence that means you've finished. Raise if he cuts you off |
+| `conversation.follow_up_s` | `10.0` | Seconds he waits for a follow-up; `0` = wake word every time |
+| `vad.end_silence_ms` | `5000` | Silence that means you've finished. Lower it (e.g. `1000`) for faster replies if you don't pause mid-sentence |
 | `vad.neg_threshold` | `0.35` | Once you're talking, quieter sounds still count as speech, so soft word endings don't cut you off |
 | `vad.start_timeout_s` | `6.0` | How long he waits for you to start after the wake word |
-| `vad.max_utterance_s` | `20.0` | Longest single recording |
+| `vad.max_utterance_s` | `60.0` | Longest single recording |
 | `vad.threshold` | `0.5` | How sure the speech detector must be that you're talking |
 
 ### People
@@ -597,6 +751,23 @@ and the right one is picked automatically. Restart Orion after changing anything
 
 See section 11: `tts.backend`, `tts.kokoro.*`, `tts.piper.*`.
 
+### Memory, conversations, rules, cloud and search
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `memory.enabled` | `true` | "Remember that..." facts |
+| `conversations.enabled` | `true` | Saving every exchange |
+| `conversations.keep_days` | `null` | `null` = forever, or a number of days |
+| `rules.enabled` | `true` | Standing instructions |
+| `cloud.model` | `claude-opus-5-5` | Claude model for Claude mode |
+| `cloud.effort` | `low` | How hard Claude thinks; low keeps spoken replies quick and cheap |
+| `cloud.fallbacks` | `true` | A request Claude's safety check declines is retried on a fallback model |
+| `router.auto` | `false` | Send impersonal general-knowledge questions to Claude automatically |
+| `search.enabled` | `true` | `false` = offline mode |
+| `search.backend` | `searxng` | `searxng` (local) or `brave` |
+| `search.max_rounds` | `3` | Search rounds per question |
+| `backups.keep` | `30` | Daily encrypted database backups kept |
+
 ### Data and logs
 
 | Setting | Default | Meaning |
@@ -610,15 +781,19 @@ See section 11: `tts.backend`, `tts.kokoro.*`, `tts.piper.*`.
 
 ## 15. Your privacy: what's stored and where
 
-**Nothing leaves your computer.** After the one-time model downloads, Orion makes
-no internet connections at all. He also opens no network ports, and refuses to
+**Nothing personal leaves your computer.** Orion goes online only to search the web
+(generic queries, no personal details) and when you ask for Claude (nothing personal
+unless you say "include..."). Both are logged in the encrypted audit log. He also opens no network ports, and refuses to
 start if Ollama is reachable from the network.
 
 | What | Stored? | Where |
 |---|---|---|
 | Your voice audio | **Never.** Held in memory, discarded after each reply | none |
-| What you said, what he said | **Never** written to disk. Chat history is in memory and gone when Orion stops | none |
+| What you said, what he said | Yes, **encrypted**, per person, so he remembers your conversations. Say "don't save this conversation" to opt out | `data/orion.db` |
 | Names, roles, voice signatures | Yes, **encrypted** (AES-256) | `data/users.enc` |
+| Memories, conversations, rules | Yes, **encrypted** (SQLCipher), per person, never strangers' | `data/orion.db` |
+| What went to Claude and the web (audit log) | Yes, **encrypted** | `data/orion.db` |
+| Daily backups | Yes, **encrypted**, last 30 | `data/backups/` |
 | Training notes (if on) | Yes, **encrypted**, no conversation text | `data/training_notes.enc` |
 | The encryption key | In KDE Wallet, never on disk or in git | your system keyring |
 | Speed and memory metrics | Yes, numbers only | `logs/metrics.jsonl` |
@@ -696,6 +871,20 @@ Lower the speaker volume, or use a speakerphone with echo cancellation.
 **His voice is slow to start.**
 That's the Kokoro voice on CPU. Switch to Piper (section 11) for speed.
 
+**"My local search engine isn't responding."**
+Start it: `scripts/searxng.sh start` (needed after each reboot). Check with
+`scripts/searxng.sh status`.
+
+**"I don't have a Claude API key" / "I can't reach Claude".**
+`python main.py secrets status` should say "saved (N characters)". If it says "not set"
+(an empty paste is the usual cause: the hidden prompt shows nothing either way), copy the
+key and run `python main.py secrets set anthropic --clipboard`. If it says the key doesn't
+look like an Anthropic key, the clipboard held something else.
+
+**A rule fired when it shouldn't (or didn't when it should).**
+Say "that was wrong" straight after a wrong reminder, or "also remind me when I say ..."
+to add your phrasing.
+
 **He made something up.**
 The 3B model sometimes does. Say "that was wrong" (with training notes on) so it
 gets noted. Later phases add real data sources and fine-tuning.
@@ -709,7 +898,12 @@ gets noted. Later phases add real data sources and fine-tuning.
 - **Interrupting by just talking** (`barge_in: voice`) isn't reliable through
   laptop speakers yet, so the default is "hey jarvis" to interrupt.
 - **English only.**
-- **No memory between restarts** except who people are. "Remember that..." arrives in Phase 2.
+- **Rules are matched by meaning and sometimes misfire**, especially between similar
+  rules ("I'm off" could mean leaving or bed). Correct him and he learns.
+- **Web answers are only as good as the 3B model's reading.** It sometimes misses the
+  point of a page. For important questions, "ask Claude".
+- **SearXNG must be started after each reboot** (`scripts/searxng.sh start`) until
+  Phase 9 makes Orion a service.
 - **The small model can be wrong** or invent details. Don't rely on it for facts
   that matter.
 - **Casual mode isn't perfect:** in testing he swore back about 14 times out of 15

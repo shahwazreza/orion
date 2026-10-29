@@ -5,9 +5,10 @@ assistant. Speech recognition, language model, and speech synthesis all run on t
 device. The same code runs on an x86_64 Fedora laptop (CPU only) and an NVIDIA
 Jetson Orin Nano (aarch64, CUDA), with hardware choices in `config.yaml` profiles.
 
-> Status: **Phase 1 complete:** voice loop, learning people and recognising their voices,
-> barge-in, honest answers about what Orion can't do yet. **Phase 6 in progress:** custom
-> "hey orion" wake word (training notebook ready).
+> Status: **Phase 2 built:** permanent memory, conversation memory, standing rules, Claude mode
+> with a privacy guard and encrypted audit log, and agentic web search, all on an encrypted
+> SQLCipher database. On top of **Phase 1** (voice loop, people and voice recognition, barge-in).
+> **Phase 6 in progress:** custom "hey orion" wake word (training notebook ready).
 > Wake word → listen → who's speaking? → transcribe → reply → speak.
 
 ```
@@ -114,7 +115,7 @@ consecutive checks, and a transcript-overlap check. Through laptop speakers it
 still triggers on room noise, so it needs echo cancellation (headset,
 speakerphone, or PipeWire echo-cancel).
 
-**Conversation mode:** after Orion answers, he keeps listening for 6 seconds
+**Conversation mode:** after Orion answers, he keeps listening for 10 seconds
 (`conversation.follow_up_s`), so follow-ups don't need the wake word. A soft
 single chime means he's still listening. Stay silent, or say "thanks, that's all",
 to end the conversation. Set `follow_up_s: 0` to require the wake word every time.
@@ -164,6 +165,41 @@ phases keep passphrases and spoken confirmations for that.
 `people.threshold` (e.g. 0.50). If he often fails to recognise you, lower it
 (e.g. 0.35) or say "relearn my voice" in the room and with the mic you normally
 use. Confident matches also refine your voiceprint automatically over time.
+
+## Memory, conversations, rules (Phase 2)
+
+All per person, encrypted in `data/orion.db` (SQLCipher, key derived from the keyring data
+key), with daily encrypted backups (last 30). Used by the local model only.
+
+- **Memory:** "remember that..." and lasting facts said in passing; recalled by meaning
+  (`nomic-embed-text` via Ollama) and given to the local model when relevant.
+- **Conversations:** every exchange saved; recent turns restored after a restart; recall by
+  day ("yesterday") or meaning ("what did I say about my exam?"); daily summaries written by
+  the local model; "don't save this conversation".
+- **Rules:** "whenever X, do Y". Embeddings alone and the 3B model as a yes/no judge both
+  failed in testing (see [benchmarks](docs/benchmarks.md)), so the model writes casual
+  variations of each trigger at creation, drifted ones are dropped, matching uses the closest
+  variation, and guards reject questions, other people and plans. "That was wrong" and "also
+  remind me when I say..." correct it.
+
+Thresholds were calibrated on real embeddings, not guessed (`core/memory.py`,
+`core/conversations.py`, `core/rules.py`).
+
+## Claude mode and web search (Phase 2)
+
+- **Router** (`core/router.py`): local by default; "ask Claude ...", "switch to Claude mode" /
+  "back to local"; optional auto-router off by default. Every decision is logged.
+- **Privacy guard:** cloud requests are built from scratch, with no names, memories, conversations
+  or rules unless the person says "include ..." for that request. Every request is audited
+  exactly as sent (`python main.py audit`), with token cost. No audit log, no cloud.
+- **Claude** (`brain/claude.py`): `claude-opus-5-5`, effort `low`, server-side refusal fallbacks,
+  key from the keyring. Any failure is spoken and answered locally.
+- **Web search** (`core/web_search.py`, `brain/web.py`): local SearXNG container on
+  `127.0.0.1` (`scripts/searxng.sh`) or Brave. Code catches obvious "needs current info"
+  requests; otherwise the local answer's first sentence is held back and searched instead if it
+  admits not knowing. Pages are read with trafilatura, answers name their source, queries are
+  privacy-filtered, pages are untrusted data, and private network addresses are refused.
+  Big questions offer a handoff to Claude with its own web search.
 
 ## Language
 
@@ -255,7 +291,7 @@ python scripts/bench.py --runs 2 --write
 Laptop (i5-10th gen, CPU only), Phase 1 with the Piper voice: **about 3.2 s from
 end of speech to first audio** (STT 1.4 s, LLM first token 0.46 s), with 10/10
 transcripts correct. With the Kokoro voice, add about 2.5 s on this CPU.
-Memory: Orion about 1.0 GB, Ollama about 2.6 GB. Voice mode adds the 1.0 s silence
+Memory: Orion about 1.0 GB, Ollama about 2.6 GB. Voice mode adds the 5 s silence
 window that decides you've finished talking (`vad.end_silence_ms`; it was 0.8 s when
 the latency above was measured).
 
@@ -375,9 +411,11 @@ update its URL, blank its hash, run the script, then pin the printed hash.
 
 - [x] Phase 1: Voice loop, conversation follow-ups, natural voice
 - [x] Learn people's names; recognise who's speaking by voice (multi-user)
-- [ ] Phase 2: Router, Claude mode with privacy guard, permanent memory, standing rules
-- [ ] Phase 2.5: Encryption at rest (SQLCipher, keyring), shutdown and wipe kill switches
-  *(started: keyring-held key and AES-GCM files, used for the user store)*
+- [x] Phase 2: Router, Claude mode with privacy guard, web search, permanent memory,
+  conversation memory, standing rules ([spec](docs/specs/phase-2.md)) *(built; awaiting
+  live voice testing)*
+- [ ] Phase 2.5: Shutdown and wipe kill switches *(encryption at rest done: keyring key,
+  AES-GCM files, SQLCipher database, encrypted backups)*
 - [ ] Phase 3: Outlook mail and calendar (Microsoft Graph, device code flow, read-only)
 - [ ] Phase 4: Alarms and morning briefing
 - [ ] Phase 5: Local meeting notes

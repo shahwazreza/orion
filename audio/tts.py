@@ -117,6 +117,7 @@ class Chimes:
     def __init__(self, sample_rate: int) -> None:
         self.listening = tone([660, 880], sample_rate)    # rising: recording you now
         self.follow_up = tone([880], sample_rate, note_s=0.07, volume=0.15)  # soft: still listening
+        self.cloud = tone([523, 784, 1047], sample_rate, note_s=0.08, volume=0.22)  # 3 rising: going to Claude
         self.done = tone([880, 660], sample_rate)         # falling: stopped recording
         self.error = tone([330, 247], sample_rate, note_s=0.15)
 

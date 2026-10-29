@@ -47,3 +47,9 @@ def test_later_text_only_splits_when_long():
 def test_bullets_become_separate_clean_chunks():
     out = stream("Two things:\n- First one\n- Second one")
     assert out == ["Two things:", "First one", "Second one"]
+
+
+def test_initials_do_not_split_sentences():
+    out = stream("The prize went to John Clarke, Michel H. Devoret and John M. Martinis. Well deserved.")
+    assert out[-1] == "Well deserved."
+    assert "Michel H. Devoret" in " ".join(out) and all(not s.endswith(" H.") for s in out)

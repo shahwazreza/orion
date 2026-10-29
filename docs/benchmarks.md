@@ -66,3 +66,49 @@ End-of-speech on 200 far-field sentences:
 - **Live check:** on the laptop with the mic at 100%, Reza scored 0.57 to 0.76
   when recognised. Other voices peaked at about 0.39, consistent with 0.40 as
   the cutoff.
+
+## Phase 2 — memory, rules, web search (laptop, 2026-10-29)
+
+Design decisions in Phase 2 were measured on the real models (llama3.2:3b, nomic-embed-text)
+before choosing thresholds or approaches.
+
+### Memory and conversation recall (nomic-embed-text)
+
+| Matching | Related | Unrelated | Threshold chosen |
+|---|---|---|---|
+| Short topics vs memories ("my sister", "nuts") | 0.59 - 0.76 | 0.42 - 0.53 | recall/forget 0.56 |
+| Full requests vs memories ("can I eat this peanut butter sandwich?") | 0.52 | up to 0.53 | context 0.52 (model told to use only if relevant) |
+| Topics vs past questions ("my calculus exam") | 0.61 - 0.74 | 0.46 - 0.52 | 0.56 |
+| Full requests vs past questions | 0.60 - 0.77 | 0.43 - 0.51 | 0.57 |
+
+The top-ranked match was correct in every related case.
+
+### Standing rules: deciding when "I'm off" means "I'm leaving my room"
+
+4 rules, 13 utterances that should fire one, 11 that shouldn't:
+
+| Approach | Fired correctly | False fires |
+|---|---|---|
+| Embedding similarity to the trigger | ranked poorly: "my roommate left the room" scored 0.73, above "leaving now" (0.63) | - |
+| llama3.2:3b as a yes/no judge (3 prompt styles) | 1-6 / 13 | 1-8 / 75 pairs, ~1 s per check |
+| **Model-written trigger variations + drift filter + guards, threshold 0.62** | **8 / 13** | **1 / 11** |
+
+Remaining errors were mostly confusions between similar rules ("I'm off": leaving or bed).
+Hence the two corrections: "that was wrong" (adds a not-this example) and "also remind me
+when I say ...". Live check: "Okay I'm heading out" fired (0.71); "my roommate left the room"
+and "how do I leave a group chat?" didn't.
+
+### Web search: when to search
+
+14 questions (6 need current info, 8 don't):
+
+| Approach | Correct decisions | Notes |
+|---|---|---|
+| Offer llama3.2:3b a `web_search` tool | 7 / 14 | Searched for "tell me a joke" and "capital of France"; +2 s per turn |
+| Ask it to reply `SEARCH: <query>` when unsure | 9 / 14 | Never over-searched; often wrote "I'm not familiar... SEARCH:" after a sentence |
+| **Code gate for obvious cases + hold back the first sentence and search if it admits not knowing** | **14 / 14** | Used |
+
+Live: "Who won the 2025 Nobel Prize in Physics?" → read NobelPrize.org, answered correctly with
+the source named. Known weakness: the 3B model sometimes misreads pages (asked for the newest
+Python, it answered with the in-development branch). The answer step now uses only pages
+actually read (it had trusted a third-party snippet over python.org).

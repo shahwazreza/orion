@@ -7,6 +7,8 @@
     python main.py --list-devices
     python main.py users [list | rename OLD NEW | delete NAME | relearn NAME]
     python main.py notes [list | clear]
+    python main.py secrets [set anthropic | status]
+    python main.py audit [N]
 """
 
 from __future__ import annotations
@@ -35,7 +37,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--demo", action="store_true",
                    help="demo mode for IT demos / interviews: clean language, demo overrides")
     p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
-    p.add_argument("command", nargs="*",
+    # REMAINDER: everything after the command word is passed through, so subcommand
+    # options like "secrets set anthropic --clipboard" aren't mistaken for Orion's own.
+    p.add_argument("command", nargs=argparse.REMAINDER,
                    help="optional: users [list | rename OLD NEW | delete NAME | relearn NAME], "
                         "notes [list | clear]")
     return p.parse_args(argv)
@@ -110,6 +114,10 @@ def main(argv: list[str] | None = None) -> int:
             return users_cli(cfg, args.command[1:])
         if args.command[0] == "notes":
             return notes_cli(cfg, args.command[1:])
+        if args.command[0] == "secrets":
+            return secrets_cli(args.command[1:])
+        if args.command[0] == "audit":
+            return audit_cli(cfg, args.command[1:])
         log.error("Unknown command %r. Try: users list, notes list", args.command[0])
         return 2
 
@@ -148,10 +156,14 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.demo:
         policy.keep_clean(DEMO)
         log.info("Demo mode: clean language")
-    assistant = Assistant(llm, speaker, metrics, cfg.profile, name,
-                          max_history_turns=cfg.get("llm.max_history_turns", 8), profanity=policy)
     store = open_user_store(cfg)
     notes = open_training_notes(cfg)
+    knowledge = open_knowledge(cfg, llm, store)
+    assistant = Assistant(llm, speaker, metrics, cfg.profile, name,
+                          max_history_turns=cfg.get("llm.max_history_turns", 8), profanity=policy,
+                          memory=knowledge.memory, conversations=knowledge.log)
+    router = make_router(cfg, assistant, knowledge)
+    assistant.web = make_web_searcher(cfg, llm, store, knowledge, router)
 
     try:
         with timed(f"LLM {llm_cfg['model']}"):
@@ -165,16 +177,21 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if relearn:
             return run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
-                             relearn=relearn)
+                             relearn=relearn, knowledge=knowledge, router=router)
         if args.text:
             log.info("Memory: %s", memory_snapshot())
-            run_text(cfg, assistant, speaker, store, notes)
+            run_text(cfg, assistant, speaker, store, notes, knowledge, router)
         else:
-            return run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes)
+            return run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
+                             knowledge=knowledge, router=router)
     except KeyboardInterrupt:
         print()
     finally:
         speaker.close()
+        if knowledge.log is not None:
+            knowledge.log.close()        # finish indexing the last exchanges
+        if knowledge.db is not None:
+            knowledge.db.close()
     return 0
 
 
@@ -238,6 +255,216 @@ def notes_cli(cfg, args: list[str]) -> int:
     return 2
 
 
+class Knowledge:
+    """Phase 2 stores: the encrypted database, memories, and conversation log."""
+
+    def __init__(self, db=None, memory=None, log=None, rules=None):
+        self.db, self.memory, self.log, self.rules = db, memory, log, rules
+
+    def commands(self, verified):
+        """(memory, conversation, rule) command handlers, or Nones when unavailable."""
+        from core.conversations import ConversationCommands
+        from core.memory import MemoryCommands
+        from core.rules import RuleCommands
+
+        if self.db is None:
+            return None, None, None
+        convo_cmds = ConversationCommands(self.log, verified) if self.log else None
+        mem_cmds = (MemoryCommands(self.memory, verified,
+                                   recall_conversation=convo_cmds.recall_topic if convo_cmds else None)
+                    if self.memory else None)
+        rule_cmds = RuleCommands(self.rules, verified) if self.rules else None
+        return mem_cmds, convo_cmds, rule_cmds
+
+
+def open_knowledge(cfg, llm, store) -> Knowledge:
+    """Open the encrypted database and the memory / conversation stores.
+
+    Without the keyring nothing personal can be stored safely, so Orion runs
+    without memory rather than writing anything unencrypted.
+    """
+    from brain.embeddings import OllamaEmbedder
+    from core.conversations import ConversationLog, make_summarizer
+    from core.memory import MemoryStore
+    from core.rules import RuleBook, make_paraphraser
+    from security.keystore import KeyStoreError, get_data_key
+    from storage.db import DatabaseError, open_database
+
+    if not (cfg.get("memory.enabled", True) or cfg.get("conversations.enabled", True)):
+        return Knowledge()
+    try:
+        db = open_database(cfg.path("paths.data"), get_data_key())
+    except (KeyStoreError, DatabaseError) as exc:
+        log.warning("%s. Memory and conversation history are off this session.", exc)
+        return Knowledge()
+    embedder = OllamaEmbedder(cfg.get("llm.host"), cfg.get("embeddings.model", "nomic-embed-text"))
+    memory = MemoryStore(db, embedder) if cfg.get("memory.enabled", True) else None
+    convo = None
+    if cfg.get("conversations.enabled", True):
+        convo = ConversationLog(db, embedder, summarize=make_summarizer(llm))
+        removed = convo.apply_retention(cfg.get("conversations.keep_days"))
+        if removed:
+            log.info("Retention: removed %d old messages", removed)
+        convo.summarize_past_days(store.all())
+    rules = (RuleBook(db, embedder, paraphrase=make_paraphraser(cfg.get("llm.host"), cfg.get("llm.model")))
+             if cfg.get("rules.enabled", True) else None)
+    try:
+        db.backup(cfg.path("paths.data") / "backups", keep=cfg.get("backups.keep", 30))
+    except Exception:
+        log.exception("Daily backup failed")
+    return Knowledge(db, memory, convo, rules)
+
+
+def make_router(cfg, assistant, knowledge):
+    """Claude mode needs an API key AND the encrypted audit log; otherwise local only."""
+    from brain.claude import ClaudeBackend, api_key
+    from core.router import Router
+    from storage.audit import AuditLog
+
+    audit = AuditLog(knowledge.db) if knowledge.db is not None else None
+    have_key = bool(cfg.get("cloud.enabled", True) and api_key())
+    if have_key and audit is not None:
+        assistant.cloud = ClaudeBackend.from_config(cfg.section("cloud"))
+        assistant.audit = audit
+        log.info("Claude mode available (%s)", assistant.cloud.model)
+    elif cfg.get("cloud.enabled", True):
+        log.info("Claude mode unavailable: %s", "no API key" if audit is not None else "no encrypted audit log")
+    router = Router(auto=bool(cfg.get("router.auto", False)), cloud_available=assistant.cloud is not None)
+    router.audit = audit
+    return router
+
+
+def make_web_searcher(cfg, llm, store, knowledge, router):
+    """SearXNG on loopback (checked) or Brave; None when search is off or unreachable."""
+    from brain.web import BraveBackend, CachedSearch, PageReader, SearxngBackend
+    from core.net_guard import exposed_listeners, port_of
+    from core.web_search import PrivacyFilter, WebSearcher, memory_terms_from
+
+    s = cfg.section("search")
+    if not s.get("enabled", True):
+        log.info("Web search: off (search.enabled: false)")
+        return None
+    if s.get("backend", "searxng") == "brave":
+        import keyring
+
+        key = (keyring.get_password("orion", "brave-api-key") or "").strip()
+        if not key:
+            log.warning("Web search: Brave selected but no key (python main.py secrets set brave)")
+            return None
+        backend = BraveBackend(key)
+    else:
+        url = s.get("searxng_url", "http://127.0.0.1:8888")
+        exposed = exposed_listeners(port_of(url))
+        if exposed:
+            log.error("SearXNG is reachable from the network on %s. Not using it (dorm rule); "
+                      "restart it with scripts/searxng.sh start.", exposed)
+            return None
+        backend = SearxngBackend(url)
+        try:
+            backend.search("test", n=1)
+        except Exception:
+            log.warning("Web search: SearXNG not reachable at %s (start it: scripts/searxng.sh start)", url)
+            return None
+    audit = getattr(router, "audit", None)
+    privacy = PrivacyFilter(lambda: [u.name for u in store.all()], memory_terms_from(knowledge.memory))
+    web = WebSearcher(CachedSearch(backend, ttl_s=s.get("cache_s", 900)), PageReader(max_chars=s.get("page_chars", 2500)),
+                      llm, privacy, audit=audit, max_rounds=s.get("max_rounds", 3))
+    log.info("Web search: %s", backend.name)
+    return web
+
+
+def secrets_cli(args: list[str]) -> int:
+    """Store API keys in the system keyring with hidden input. Never printed."""
+    import getpass
+
+    import keyring
+
+    names = {"anthropic": "anthropic-api-key", "brave": "brave-api-key"}
+    prefixes = {"anthropic": "sk-ant-", "brave": ""}
+    if args[:1] == ["status"] or not args:
+        for label, name in names.items():
+            try:
+                value = (keyring.get_password("orion", name) or "").strip()
+            except Exception:
+                value = ""
+            if not value:
+                state = "not set"
+            elif prefixes[label] and not value.startswith(prefixes[label]):
+                state = f"saved, but it doesn't look like a {label} key (should start {prefixes[label]}...)"
+            else:
+                state = f"saved ({len(value)} characters)"
+            print(f"  {label:<10} {state}")
+        return 0
+    if args[0] == "set" and len(args) in (2, 3) and args[1] in names:
+        if args[2:] == ["--clipboard"]:
+            # Read straight from the clipboard: no hidden-prompt paste to go wrong.
+            import shutil
+            import subprocess
+
+            tool = (["wl-paste", "--no-newline"] if shutil.which("wl-paste")
+                    else ["xclip", "-selection", "clipboard", "-o"] if shutil.which("xclip") else None)
+            if tool is None:
+                print("No clipboard tool found (install wl-clipboard or xclip).")
+                return 1
+            value = subprocess.run(tool, capture_output=True, text=True).stdout.strip()
+        else:
+            print("Paste the key and press Enter. It stays hidden (in most terminals paste is Ctrl+Shift+V).")
+            print("Tip: copy the key, then run: python main.py secrets set anthropic --clipboard")
+            value = getpass.getpass(f"{args[1]} key (hidden): ").strip()
+        if not value:
+            print("Nothing entered; unchanged.")
+            return 1
+        if args[1] == "anthropic" and not value.startswith("sk-ant-"):
+            print("That doesn't look like an Anthropic API key (they start with sk-ant-). Not saved.")
+            return 1
+        keyring.set_password("orion", names[args[1]], value)
+        print(f"Saved to the system keyring ({len(value)} characters).")
+        if args[2:] == ["--clipboard"]:
+            import shutil
+            import subprocess
+
+            if shutil.which("wl-copy"):
+                subprocess.run(["wl-copy", "--clear"], check=False)
+                print("Clipboard cleared.")
+        return 0
+    print("Usage: python main.py secrets [status | set anthropic [--clipboard] | set brave [--clipboard]]")
+    return 2
+
+
+def audit_cli(cfg, args: list[str]) -> int:
+    """What went where: routing decisions and cloud requests, newest first."""
+    from datetime import datetime
+
+    from security.keystore import KeyStoreError, get_data_key
+    from storage.audit import AuditLog
+    from storage.db import DatabaseError, open_database
+
+    try:
+        db = open_database(cfg.path("paths.data"), get_data_key(create=False))
+    except (KeyStoreError, DatabaseError) as exc:
+        print(f"Can't open the audit log: {exc}")
+        return 1
+    audit = AuditLog(db)
+    limit = int(args[0]) if args and args[0].isdigit() else 30
+    n, cost = audit.month_cost()
+    print(f"This month: {n} cloud requests, about ${cost:.2f} (check the Claude Console for actual billing)\n")
+    for ts, kind, d in audit.recent(limit):
+        when = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+        if kind == "cloud_request":
+            body = d.get("body", {})
+            last = (body.get("messages") or [{}])[-1].get("content", "")
+            usage = d.get("usage") or {}
+            print(f"{when}  CLOUD  {body.get('model')}  personal data included: {d.get('included_personal')}"
+                  f"  tokens {usage.get('input_tokens', '?')}/{usage.get('output_tokens', '?')}"
+                  f"  ${usage.get('cost_usd', 0):.4f}{'  ERROR' if d.get('error') else ''}\n"
+                  f"                sent: {str(last)[:120]!r}")
+        elif kind == "route":
+            print(f"{when}  route  {d.get('route'):<5}  {d.get('reason')}")
+        else:
+            print(f"{when}  {kind}  {d}")
+    return 0
+
+
 def make_identity(cfg, store, encoder):
     from core.identity import Identity
 
@@ -249,7 +476,7 @@ def make_identity(cfg, store, encoder):
                     adapt_min_audio_s=p.get("adapt_min_audio_s", 2.0))
 
 
-def run_text(cfg, assistant, speaker, store, notes) -> None:
+def run_text(cfg, assistant, speaker, store, notes, knowledge=None, router=None) -> None:
     """Text mode is the owner's terminal, so it acts as the owner."""
     from core.dialog import TextDialog
     from core.metrics import TurnMetrics
@@ -261,6 +488,18 @@ def run_text(cfg, assistant, speaker, store, notes) -> None:
     print("Text mode. Commands: /reset (forget this chat), /stats (last turn), /quit")
     people.greet_on_start(dialog)
     identity.set_current(store.owner())
+    knowledge = knowledge or Knowledge()
+    mem_cmds, convo_cmds, rule_cmds = knowledge.commands(people._verified)
+    from core.dialog import yes_no
+    from core.web_search import handle_command as web_command
+
+    def confirm(prompt):
+        answer = dialog.ask(prompt)
+        return answer is not None and yes_no(answer.text) is True
+
+    assistant.confirm = confirm
+    if convo_cmds is not None:
+        convo_cmds.log.start_conversation(identity.current)
     while True:
         try:
             line = input("You: ").strip()
@@ -282,6 +521,12 @@ def run_text(cfg, assistant, speaker, store, notes) -> None:
 
         from core import feedback
 
+        if rule_cmds is not None and rule_cmds.handle(Heard(line), dialog, identity.current):
+            continue
+        web_reply = web_command(line, assistant.web)
+        if web_reply:
+            dialog.say(web_reply)
+            continue
         if feedback.handle(Heard(line), dialog, identity.current, notes, assistant.last_turn):
             continue
         mode_reply = handle_command(line, assistant.profanity)
@@ -290,13 +535,36 @@ def run_text(cfg, assistant, speaker, store, notes) -> None:
             continue
         if people.handle(Heard(line), dialog):
             continue
-        assistant.respond(line, TurnMetrics(mode="text"), identity.current)
+        if mem_cmds is not None and mem_cmds.handle(Heard(line), dialog, identity.current):
+            continue
+        if convo_cmds is not None and convo_cmds.handle(Heard(line), dialog, identity.current):
+            continue
+        decision = router.decide(line, identity.current.id if identity.current else "guest") if router else None
+        if decision is not None:
+            if router.audit is not None:
+                router.audit.record("route", route=decision.route, reason=decision.reason,
+                                    person=identity.current.id if identity.current else None)
+            if not router.in_claude_mode(identity.current.id if identity.current else "guest"):
+                assistant.end_cloud_session(identity.current)
+            if decision.announce:
+                dialog.say(decision.announce)
+            if decision.handled:
+                continue
+        if decision is not None and decision.route == "cloud":
+            print("[-> Claude]")
+            assistant.respond_cloud(decision.text, TurnMetrics(mode="text"), identity.current, decision,
+                                    session=router.in_claude_mode(identity.current.id if identity.current else "guest"))
+        else:
+            assistant.respond(decision.text if decision and decision.text else line,
+                              TurnMetrics(mode="text"), identity.current)
+        if knowledge.rules is not None:
+            for rule in knowledge.rules.check(identity.current, line):
+                dialog.say(rule.spoken_action())
 
 
 def users_cli(cfg, args: list[str]) -> int:
     """List, rename, or delete people from the terminal (deletion asks first)."""
     store = open_user_store(cfg)
-    notes = open_training_notes(cfg)
     if not store.persistent:
         log.error("Keyring unavailable; can't open the user store.")
         return 1
@@ -333,7 +601,7 @@ def users_cli(cfg, args: list[str]) -> int:
 
 
 def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
-              relearn: str | None = None) -> int:
+              relearn: str | None = None, knowledge=None, router=None) -> int:
     from audio.devices import AudioDeviceError, Microphone
     from audio.stt import make_stt
     from audio.vad import Endpointer, SileroVAD
@@ -417,6 +685,19 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
     loop = VoiceLoop(mic, wake, endpointer, stt, assistant, speaker, chimes, identity, people,
                      follow_up_s=cfg.get("conversation.follow_up_s", 6.0), notes=notes,
                      barge_in=barge, wake_phrases=heard_phrases)
+    if people is not None:
+        knowledge = knowledge or Knowledge()
+        loop.memory_commands, loop.conversation_commands, loop.rule_commands = knowledge.commands(people._verified)
+        loop.rules = knowledge.rules
+    loop.router = router
+    loop.audit = getattr(router, "audit", None)
+    from core.dialog import yes_no
+
+    def confirm(prompt):
+        answer = loop.ask(prompt, timeout_s=10.0)
+        return answer is not None and yes_no(answer.text) is True
+
+    assistant.confirm = confirm
     try:
         if relearn:
             mic.start()
