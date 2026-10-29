@@ -28,6 +28,7 @@ details (architecture, tests, benchmarks), see the [README](../README.md).
 12a. [Memory, conversations and rules](#12a-memory-conversations-and-rules)
 12b. [Claude mode](#12b-claude-mode)
 12c. [Web search](#12c-web-search)
+12d. [Kill switches and mute](#12d-kill-switches-and-mute)
 13. [Terminal command reference](#13-terminal-command-reference)
 14. [Settings reference](#14-settings-reference)
 15. [Your privacy: what's stored and where](#15-your-privacy-whats-stored-and-where)
@@ -57,16 +58,16 @@ details (architecture, tests, benchmarks), see the [README](../README.md).
 - **Look things up on the web** when he doesn't know, and say where the answer came from.
 - **Ask Claude** for you, only when you say so, with nothing personal sent unless you allow it.
 - Run in text mode, where you type instead of talk.
+- **Shut down on command** ("Orion, shut down"), **mute** ("stop listening"), and erase
+  everything with your secret **wipe passphrase** (section 12d).
 
 **He can't yet** (these come in later phases):
 
 | Not yet | Coming in |
 |---|---|
-| Shut down by voice, nuclear wipe | Phase 2.5 |
 | Read your email or calendar | Phase 3 |
 | Alarms, morning briefing | Phase 4 |
 | Meeting notes | Phase 5 |
-| Respond to "hey Orion" | Phase 6 |
 | Build software for you | Phase 7 |
 
 Ask him about any of these and he tells you he can't do it yet. For live or personal
@@ -131,8 +132,11 @@ source venv/bin/activate
 Startup takes about 10 seconds while models load. You'll see lines like
 `Whisper STT ready in 2.2s`, then Orion speaks.
 
-**To stop Orion, press Ctrl+C** in the terminal. (A spoken "Orion, shut down"
-arrives in Phase 2.5. Until then, saying it just starts a conversation.)
+**To stop Orion,** say "Orion, shut down", run `python main.py stop` from another
+terminal, or press Ctrl+C in his (section 12d).
+
+**First time:** set your wipe passphrase with `python main.py killswitch set`. Until
+you do, Orion reminds you at every start.
 
 ---
 
@@ -275,6 +279,17 @@ These phrases are handled directly instead, and behave the same every time.
 ### Ending
 
 See [Ending a conversation](#ending-a-conversation).
+
+### Safety
+
+These work at any time, even while Orion is muted (section 12d).
+
+| Say | What happens |
+|---|---|
+| "Orion, shut down" / "Shut yourself down" / "Turn yourself off" | Three falling notes, then Orion stops at once. No confirmation |
+| "Orion, stop listening" | Muted: he ignores everything until you say "hey orion, start listening" |
+| "Hey orion, start listening" | Unmuted |
+| *Your wipe passphrase* | He asks you to say "confirm wipe" within ten seconds, then erases everything |
 
 ---
 
@@ -620,6 +635,90 @@ Search instead: `search.backend: brave` and `python main.py secrets set brave --
 (a free Brave Search API key; not needed with SearXNG).
 Offline mode: `search.enabled: false`.
 
+## 12d. Kill switches and mute
+
+### Shutdown (level 1)
+
+Say **"Orion, shut down"** and he stops immediately: speech stops mid-word, any
+Claude or web request is abandoned, the mic closes, and the program exits. There
+is no confirmation, and nothing is lost: everything he'd saved is already saved.
+"Shut down the computer" is *not* this; turning off the device is Phase 9.
+
+The same from a terminal: `python main.py stop`. It finds the running Orion through
+a private file in your session's runtime folder (no network is involved) and gives
+him five seconds before forcing it. Ctrl+C in Orion's own terminal works too.
+
+**Keyboard shortcut (KDE):** System Settings -> Keyboard -> Shortcuts -> *Add New*
+-> *Command or Script*. Enter the full paths, for example
+`/home/you/orion/venv/bin/python /home/you/orion/main.py stop`, then pick a key
+combination such as Meta+Shift+O.
+
+### Mute
+
+"Orion, stop listening" mutes him. The wake word still works, but whatever you say
+afterwards is ignored: not answered, not shown, not saved. The only things he still
+responds to are "start listening", "shut down", and your wipe passphrase. You still
+hear the listening chime after "hey orion", so you always know when the mic is
+recording you. Mute lasts until you unmute him or restart him.
+
+### Nuclear wipe (level 2)
+
+The wipe erases everything Orion knows. Use it if your laptop is about to be taken,
+or you simply want him to forget everything.
+
+**First, set your passphrase.** Only you know it. It's never shown, stored, logged,
+or sent anywhere; Orion keeps only a salted Argon2id hash of it, inside the
+encrypted data.
+
+```bash
+python main.py killswitch set     # type it twice; nothing appears on screen
+python main.py killswitch test    # say it three times; he answers only "matched" or "didn't match"
+python main.py killswitch status  # set or not (never the passphrase)
+```
+
+Choose at least three ordinary words you'd never say by accident, like a short
+nonsense sentence. Words only (no digits), and not "Orion" at the start or end.
+Capitals and punctuation don't matter. Run the test: if Whisper sometimes mishears
+a word, pick another. To change it later, run `killswitch set` again (it asks for
+the current one first).
+
+**Spoken:** say the passphrase to Orion as you'd say anything else ("hey orion, ..."
+then the passphrase). He replies "Wipe everything I know? Say 'confirm wipe' within
+ten seconds." Say **"confirm wipe"**. Anything else, or silence, cancels. If what you
+say isn't the passphrase, nothing special happens at all: he answers it like any
+other request, so there's nothing to learn from guessing.
+
+**Silent:** `python main.py wipe` asks for the passphrase without showing it, then for
+"confirm wipe". Three wrong passphrases lock it for 5 minutes; each further lockout
+doubles, up to a day. If Orion is running, it's stopped first.
+
+**What's erased, in this order:**
+
+1. Sign-outs and token caches of online accounts (Outlook, from Phase 3).
+2. The encryption key in your keyring. This is the step that really protects you:
+   every encrypted Orion file becomes unreadable at that instant, including any
+   copy of it anywhere.
+3. The files themselves, overwritten and deleted: the database (memories,
+   conversations, rules, audit log), its backups, people and voice signatures,
+   training notes, metrics, and the local search engine's container and settings.
+4. Every other Orion key in your keyring: Claude, Brave, and later GitHub and
+   notification tokens.
+5. Orion exits and stays off.
+
+**Kept:** the code, the downloaded models, `~/orion-projects/` and `~/orion-training/`.
+The wipe itself is never logged anywhere.
+
+On an SSD with Fedora's btrfs filesystem, overwriting a file doesn't guarantee the
+old copy is gone from the disk, which is why the key is destroyed first. For full
+protection of everything else on the laptop, turn on full-disk encryption (LUKS).
+
+**Afterwards:** starting Orion again is like starting him for the first time: a new
+key, meeting the owner, no memories. Set a new passphrase, and re-enter your Claude
+key (`secrets set anthropic`). Claude's and the search engines' own servers keep
+whatever they normally keep; the wipe can only erase what's on this computer.
+
+---
+
 ## 13. Terminal command reference
 
 Run these from `~/orion` with the environment active.
@@ -658,6 +757,16 @@ Run these from `~/orion` with the environment active.
 | `python main.py audit [N]` | The last N routing decisions, cloud requests, searches and pages read, plus this month's Claude cost |
 | `scripts/searxng.sh start\|stop\|status\|logs` | The local search engine |
 
+### Safety
+
+| Command | Purpose |
+|---|---|
+| `python main.py stop` | Stop the running Orion (also for a keyboard shortcut) |
+| `python main.py killswitch set` | Set or change the wipe passphrase (hidden input) |
+| `python main.py killswitch test` | Say it three times and check Orion hears it |
+| `python main.py killswitch status` | Whether a passphrase is set, or locked after wrong tries |
+| `python main.py wipe` | Nuclear wipe: passphrase (hidden), then type "confirm wipe" |
+
 ### Training notes
 
 | Command | Purpose |
@@ -671,6 +780,7 @@ Run these from `~/orion` with the environment active.
 |---|---|
 | `python scripts/download_models.py` | Download or re-verify all models |
 | `python scripts/bench.py --runs 2` | Measure speed and memory (add `--write` to save to `docs/benchmarks.md`) |
+| `python main.py metrics [N]` | The last N per-reply timings, decrypted, as JSON lines |
 | `pytest -q` | Run the test suite |
 
 ---
@@ -775,7 +885,8 @@ See section 11: `tts.backend`, `tts.kokoro.*`, `tts.piper.*`.
 | `paths.data` | `data` | Encrypted personal data |
 | `paths.models` | `models` | Downloaded models |
 | `training_notes.enabled` | `false` | Section 12 |
-| `metrics.enabled` | `true` | Log timings and memory per reply (no conversation text) |
+| `metrics.enabled` | `true` | Log timings and memory per reply (encrypted, no conversation text) |
+| `metrics.file` | `logs/metrics.enc` | Where; read it with `python main.py metrics` |
 
 ---
 
@@ -795,8 +906,9 @@ start if Ollama is reachable from the network.
 | What went to Claude and the web (audit log) | Yes, **encrypted** | `data/orion.db` |
 | Daily backups | Yes, **encrypted**, last 30 | `data/backups/` |
 | Training notes (if on) | Yes, **encrypted**, no conversation text | `data/training_notes.enc` |
+| Your wipe passphrase | **Never.** Only a salted Argon2id hash, **encrypted** | `data/killswitch.enc` |
 | The encryption key | In KDE Wallet, never on disk or in git | your system keyring |
-| Speed and memory metrics | Yes, numbers only | `logs/metrics.jsonl` |
+| Speed and memory metrics | Yes, **encrypted**, numbers only | `logs/metrics.enc` |
 
 The `data/` folder and its files can only be read by your user account. None of
 `data/`, `logs/`, `models/`, or `voice-samples/` is ever committed to git.
@@ -805,9 +917,8 @@ A voice signature is a list of numbers describing how your voice sounds. It can'
 be played back as audio.
 
 **To remove a person:** "delete my profile", or `python main.py users delete NAME`.
-**To remove everything:** stop Orion and delete the `data/` folder. Removing the
-`orion` entry from KDE Wallet also makes any remaining copies permanently
-unreadable. (A one-command nuclear wipe arrives in Phase 2.5.)
+**To remove everything:** the nuclear wipe (section 12d): your passphrase, spoken or
+with `python main.py wipe`.
 
 ---
 
@@ -819,7 +930,7 @@ Measured on the laptop (Intel i5-10400H, no GPU):
 |---|---|
 | Time from when you stop talking to his first word (Piper voice) | about 3.2 s |
 | Same, with the Kokoro voice | about 5.5 to 6 s |
-| Speech recognition | about 1.3 to 1.4 s |
+| Speech recognition | about 4.6 s with `medium.en` (1.4 s with `small.en`) |
 | Voice recognition | about 0.03 s |
 | Orion's memory use | about 1 to 1.5 GB |
 | Ollama with llama3.2:3b loaded | about 2.6 GB |
@@ -898,7 +1009,9 @@ gets noted. Later phases add real data sources and fine-tuning.
   voices and weak for some American ones. If it often misses you, lower
   `wakeword.thresholds.hey_orion` (e.g. `0.4`), add `hey_jarvis` back as a backup, or retrain
   ([wake-word.md](wake-word.md)).
-- **No spoken shutdown yet.** Use Ctrl+C. "Orion, shut down" and the wipe arrive in Phase 2.5.
+- **The wipe can't reach beyond this computer.** Claude's and search engines' servers keep
+  what they normally keep, and on an SSD only the destroyed key (plus LUKS) guarantees old
+  file copies are unreadable.
 - **Interrupting by just talking** (`barge_in: voice`) isn't reliable through
   laptop speakers yet, so the default is "hey orion" to interrupt.
 - **English only.**

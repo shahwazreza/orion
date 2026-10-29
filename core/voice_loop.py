@@ -20,6 +20,8 @@ from core import feedback
 from core.barge_in import BargeIn
 from core.dialog import Heard
 from core.identity import Identity
+from core.lifecycle import (PassphraseHeard, Shutdown, WipeConfirmed, exit_soon, is_mute,
+                            is_shutdown, is_unmute, is_wipe_confirmation)
 from core.metrics import TurnMetrics
 from core.people import People
 from storage.training_notes import TrainingNotes
@@ -60,6 +62,10 @@ class VoiceLoop:
         self.rules = None                    # core.rules.RuleBook (checked after each reply)
         self.router = None                   # core.router.Router (local vs Claude)
         self.audit = None                    # storage.audit.AuditLog
+        self.kill_switch = None              # security.killswitch.KillSwitch (the wipe passphrase)
+        self.muted = False                   # "stop listening": only the wake word, then
+                                             # "start listening" / "shut down" / the passphrase
+        self._wake_phrase = self.wake_phrases[0]
         self._prefill: list[np.ndarray] = []   # user speech captured by a barge-in
         frames = max(1, int(self.WAKE_AUDIO_S * 1000 / endpointer.chunk_ms))
         self._recent: deque[np.ndarray] = deque(maxlen=frames)
@@ -128,16 +134,22 @@ class VoiceLoop:
             return None
         if turn:
             turn.mark("stt_done")
-        if text:
+        # The wipe passphrase is caught here, before the words are shown, logged, or
+        # saved anywhere. Nothing else in Orion ever sees them.
+        if text and self.kill_switch is not None and self.kill_switch.matches(
+                strip_wake_phrase(text, self.wake_phrases)):
+            raise PassphraseHeard()
+        if text and not self.muted:
             self.show(f"You: {text}")
         return Heard(text, audio, self.mic.sample_rate)
 
     # ---- main loop ----------------------------------------------------------
     def run(self, wake_phrase: str) -> None:
+        self._wake_phrase = wake_phrase
         self.mic.start()
         with self._sampling_echo():
             if self.people is not None:
-                self.people.greet_on_start(self)
+                self._guarded(lambda: self.people.greet_on_start(self))
             else:
                 self.say("Orion online.")
         self.show(f"Listening for '{wake_phrase}'. Ctrl+C to quit.")
@@ -153,14 +165,14 @@ class VoiceLoop:
             self._recent.clear()
             if self.people is not None and self.people.store.is_empty():
                 # Introductions were skipped at startup; nobody can own Orion yet.
-                self.people.greet_on_start(self)
+                self._guarded(lambda: self.people.greet_on_start(self))
                 self.show(f"[waiting for '{wake_phrase}']")
                 continue
             # After each reply, keep listening briefly so a conversation doesn't
             # need the wake word on every line. Silence ends it.
             self.identity.start_conversation()
             follow_up = False
-            while self.turn(follow_up) and self.follow_up_s > 0:
+            while self._guarded(lambda: self.turn(follow_up)) and self.follow_up_s > 0:
                 follow_up = True
             self.assistant.forget_guest()
             self.show(f"[waiting for '{wake_phrase}']")
@@ -172,6 +184,22 @@ class VoiceLoop:
         if heard is None:
             if not follow_up:
                 self.show("[no speech]")
+            return False
+
+        command = strip_wake_phrase(heard.text, self.wake_phrases)
+        if is_shutdown(command):
+            self.shut_down()
+        if self.muted:
+            # Muted: everything is ignored (not identified, shown, or saved) except these.
+            if is_unmute(command):
+                self.muted = False
+                self.say("I'm listening again.")
+                return True
+            return False
+        if is_mute(command):
+            self.muted = True
+            self.say(f"Okay, I've stopped listening. Say '{self._wake_phrase}, start listening' "
+                     "when you need me.")
             return False
 
         id_audio = heard.audio
@@ -256,6 +284,41 @@ class VoiceLoop:
             return True
         self._quiet()
         return True
+
+    # ---- kill switches ------------------------------------------------------
+    def shut_down(self) -> None:
+        """Level 1: stop now. No confirmation. Raises Shutdown."""
+        self.speaker.interrupt()
+        self.speaker.wait(1.0)
+        self.speaker.resume()
+        self._chime("shutdown")
+        self.speaker.wait(1.0)
+        exit_soon()
+        raise Shutdown()
+
+    def _guarded(self, step: Callable[[], bool | None]) -> bool:
+        """Run one step of the conversation; the wipe passphrase interrupts it."""
+        try:
+            return bool(step())
+        except PassphraseHeard:
+            self._confirm_wipe()
+            return False
+
+    def _confirm_wipe(self) -> None:
+        """Level 2: the passphrase was heard. 'confirm wipe' within 10 s raises WipeConfirmed."""
+        self.speaker.interrupt()
+        self.speaker.wait(1.0)
+        self.speaker.resume()
+        self.speaker.say("Wipe everything I know? Say 'confirm wipe' within ten seconds.")
+        try:
+            answer = self.listen(timeout_s=10.0)
+        except PassphraseHeard:
+            answer = None
+        if answer is not None and is_wipe_confirmation(strip_wake_phrase(answer.text, self.wake_phrases)):
+            self.speaker.say("Wiping now. Goodbye.")
+            self.speaker.wait(6.0)
+            raise WipeConfirmed()
+        self.say("Cancelled.")
 
     def _route(self, text: str, user):
         """Local or Claude for this request; mode switches are announced out loud."""

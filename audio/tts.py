@@ -120,6 +120,7 @@ class Chimes:
         self.cloud = tone([523, 784, 1047], sample_rate, note_s=0.08, volume=0.22)  # 3 rising: going to Claude
         self.done = tone([880, 660], sample_rate)         # falling: stopped recording
         self.error = tone([330, 247], sample_rate, note_s=0.15)
+        self.shutdown = tone([784, 523, 392], sample_rate, note_s=0.1)   # 3 falling: shutting down
 
 
 class AudioPlayer:

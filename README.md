@@ -15,7 +15,7 @@ Jetson Orin Nano (aarch64, CUDA), with hardware choices in `config.yaml` profile
                                          ┌─► TitaNet ──────────► who is it? (name, per-person history)
  mic ─► openWakeWord ─► Silero VAD ──────┤
         "hey orion"    end of speech    └─► faster-whisper ───► Ollama (streaming) ─► clause chunker ─► Kokoro / Piper ─► speaker
-                                             small.en int8       llama3.2:3b                             British male voice
+                                             medium.en int8      llama3.2:3b                             British male voice
 ```
 
 **Using Orion:** see the [user manual](docs/user-manual.md) for every command,
@@ -49,13 +49,13 @@ config.yaml          common settings + per-device profiles (laptop, jetson, ...)
 core/                config & profile detection, hardware probe, metrics, network
                      guard, turn orchestration, voice loop, identity (who's speaking),
                      people (onboarding + people commands), barge-in, feedback
-                     ("that was wrong"), dialog helpers
+                     ("that was wrong"), dialog helpers, lifecycle (shutdown, mute, stop)
 audio/               mic, wake word, VAD/endpointing, STT, speaker recognition,
                      TTS (Kokoro, Piper) + pipelined playback + chimes
 brain/               LLM backends + history, persona prompt, speech text cleanup,
                      language modes (profanity), capability guard (honest "can't yet")
 storage/             encrypted JSON files (AES-GCM), user store, training notes
-security/            data key in the system keyring
+security/            data key in the system keyring, wipe passphrase (Argon2id), nuclear wipe
 tools/               placeholder for Phase 2+
 scripts/             download_models.py (hash-pinned), bench.py (latency), voice_eval.py
                      (speaker recognition + endpointing on LibriSpeech), wakeword_test.py
@@ -79,7 +79,7 @@ source venv/bin/activate
 pip install --no-deps -r requirements.txt
 
 # Models: wake word, VAD, speaker recognition, Kokoro and Piper voices (about
-# 575 MB, SHA-256 verified). Whisper small.en (about 465 MB) downloads on first run.
+# 575 MB, SHA-256 verified). Whisper medium.en (about 1.5 GB) downloads on first run.
 python scripts/download_models.py
 
 # Ollama must already be installed with the model pulled:
@@ -102,6 +102,9 @@ python main.py --list-devices   # find your mic / speaker names
 python main.py --profile jetson # force a profile (or ORION_PROFILE=jetson)
 python main.py --demo           # demo mode for IT demos / interviews (clean language)
 python main.py -v               # debug logging
+python main.py stop             # stop a running Orion (or say "Orion, shut down")
+python main.py killswitch set   # set the wipe passphrase (hidden; do this first)
+python main.py wipe             # nuclear wipe, silent trigger
 ```
 
 Text-mode commands: `/reset` clears the conversation, `/stats` shows the last
@@ -238,7 +241,7 @@ wrong tools will be logged automatically once Phase 2 adds the router and tools.
   The only context kept is an allowlist of facts about the turn (mode, model,
   language mode, reply length, latency), and the code rejects anything else.
 - Encrypted in `data/training_notes.enc` with the keyring key. The nuclear wipe
-  (Phase 2.5) deletes it.
+  deletes it.
 - Only people Orion recognises can add notes. View or clear them with
   `python main.py notes list` and `python main.py notes clear`.
 - Phase 10 uses these notes only to decide which **synthetic** examples to
@@ -359,13 +362,31 @@ update its URL, blank its hash, run the script, then pin the printed hash.
 
 ## Security notes
 
-- **Full-disk encryption:** use LUKS on both the laptop and the Jetson's NVMe.
-  Orion encrypts its own data (users and voiceprints now; everything else in
-  Phase 2.5). LUKS protects everything else if a device is lost.
-- **Keyring:** the data key is in KWallet / GNOME Keyring. Deleting the `orion`
-  entry there makes `data/users.enc` permanently unreadable (that's how the
-  Phase 2.5 wipe will work). On the Jetson, a systemd service has no desktop
-  keyring session; Phase 9 will set up a headless key store.
+- **Everything at rest is encrypted** with one 256-bit key held in the system keyring:
+  the database (SQLCipher: memories, conversations, rules, audit log) and its backups,
+  people and voiceprints, training notes, the wipe passphrase hash (AES-256-GCM), and
+  the metrics log (one AES-GCM record per line). Nothing is written to disk in plain text;
+  without the keyring, Orion runs but saves nothing.
+- **Level 1 kill switch:** "Orion, shut down", `python main.py stop`, or Ctrl+C stops
+  everything within about a second (a watchdog forces the exit after 3 s if a network call
+  hangs). `stop` reaches Orion through a process file in `$XDG_RUNTIME_DIR`, never a port.
+  A deliberate stop exits 0, so the Phase 9 service (`Restart=on-failure`) won't restart it.
+- **Level 2 kill switch (nuclear wipe):** a passphrase you set (`killswitch set`, hidden
+  input), stored only as a salted Argon2id hash (OWASP parameters, ~35 ms per check) inside
+  the encrypted data. Every utterance is checked before it's shown, logged, or saved, so the
+  passphrase never reaches the screen, the conversation log, or the model. A match asks for
+  a spoken "confirm wipe"; a non-match has no visible effect. The typed trigger
+  (`python main.py wipe`) locks for 5 minutes after 3 wrong tries, doubling up to a day.
+  The wipe deletes the data key first (crypto-shredding), then overwrites and deletes
+  `data/` and `logs/`, removes the SearXNG container and config, and deletes every `orion`
+  keyring entry (a Secret Service search, so later phases' tokens are included). It never
+  touches the code, models, `~/orion-projects/` or `~/orion-training/`, and is never logged.
+  See `security/wipe.py` and the user manual, section 12d.
+- **Full-disk encryption:** use LUKS on both the laptop and the Jetson's NVMe. On an SSD
+  with btrfs, overwriting a file doesn't reliably destroy the old blocks; destroying the key
+  makes them unreadable, and LUKS protects everything else on the disk.
+- **Keyring:** the data key is in KWallet / GNOME Keyring under `orion`. On the Jetson, a
+  systemd service has no desktop keyring session; Phase 9 will set up a headless key store.
 - Check that Ollama isn't exposed: `ss -ltnp | grep 11434` should show `127.0.0.1`.
   Never set `OLLAMA_HOST=0.0.0.0`.
 
@@ -415,8 +436,8 @@ update its URL, blank its hash, run the script, then pin the printed hash.
 - [x] Phase 2: Router, Claude mode with privacy guard, web search, permanent memory,
   conversation memory, standing rules ([spec](docs/specs/phase-2.md)) *(built; awaiting
   live voice testing)*
-- [ ] Phase 2.5: Shutdown and wipe kill switches *(encryption at rest done: keyring key,
-  AES-GCM files, SQLCipher database, encrypted backups)*
+- [x] Phase 2.5: Encryption at rest, shutdown and nuclear-wipe kill switches, mute
+  ([spec](docs/specs/phase-2.5.md)) *(built; awaiting live voice testing)*
 - [ ] Phase 3: Outlook mail and calendar (Microsoft Graph, device code flow, read-only)
 - [ ] Phase 4: Alarms and morning briefing
 - [ ] Phase 5: Local meeting notes

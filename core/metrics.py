@@ -1,17 +1,16 @@
 """Per-turn latency and memory metrics.
 
-Only numbers are recorded. Transcripts and replies are deliberately excluded:
-nothing personal touches disk until the encrypted store exists (Phase 2.5).
+Only numbers are recorded; transcripts and replies are deliberately excluded.
+Rows are still encrypted (logs/metrics.enc, read with `python main.py metrics`),
+like every other log Orion keeps.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import psutil
@@ -76,18 +75,18 @@ class TurnMetrics:
 
 
 class MetricsSink:
-    def __init__(self, path: Path | None, enabled: bool = True) -> None:
-        self.enabled = enabled and path is not None
-        self.path = path
-        if self.enabled:
-            path.parent.mkdir(parents=True, exist_ok=True)
+    """Writes one encrypted row per turn (``storage.encrypted_file.EncryptedLines``).
+    Without a log (no keyring, or metrics off) rows are only returned, never written."""
+
+    def __init__(self, log_file=None, enabled: bool = True) -> None:
+        self.enabled = enabled and log_file is not None
+        self.log_file = log_file
 
     def record(self, turn: TurnMetrics, profile: str) -> dict[str, Any]:
         row = {"ts": round(time.time(), 3), "profile": profile, **turn.summary(), **memory_snapshot()}
         if self.enabled:
             try:
-                with open(self.path, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(row) + "\n")
+                self.log_file.append(row)
             except OSError as exc:
                 log.warning("Could not write metrics: %s", exc)
         return row
