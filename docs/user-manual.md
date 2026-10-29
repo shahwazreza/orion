@@ -64,8 +64,12 @@ details (architecture, tests, benchmarks), see the [README](../README.md).
 | Respond to "hey Orion" | Phase 6 |
 | Build software for you | Phase 7 |
 
-Ask him about any of these and he should tell you he can't do it yet. He's told
-never to invent emails, events, or facts.
+Ask him about any of these and he tells you he can't do it yet. For live or personal
+information (weather, your email or calendar, the news, prices, scores, alarms and
+reminders) that answer is built in: *"I can't check the weather yet. That's coming
+with the morning briefing, and I won't guess."* The model never gets the chance to
+make something up. Ordinary questions about those topics ("how does weather form?",
+"how do I write a professional email?") are still answered normally.
 
 ---
 
@@ -163,7 +167,8 @@ can read.
 
 ### A conversation, step by step
 
-1. Say **"hey jarvis"**. *(It's a placeholder wake word; "hey Orion" comes in Phase 6.)*
+1. Say **"hey jarvis"**. *(A placeholder. To train and switch to "hey orion", see
+   [wake-word.md](wake-word.md).)*
 2. You hear a **rising chime**: he's recording.
 3. Speak normally. When you pause for about a second, a **falling chime** means
    he's stopped recording.
@@ -172,6 +177,10 @@ can read.
    without the wake word, within 6 seconds.
 6. To end, stay silent or say something like **"thanks, that's all"**. You hear
    the falling chime and he goes back to waiting for "hey jarvis".
+
+You don't need to pause after the wake word: "Hey jarvis, what time is it in
+Tokyo?" works in one breath. The wake phrase is removed before your request is
+answered, so he won't comment on what you called him.
 
 ### The chimes
 
@@ -537,8 +546,10 @@ and the right one is picked automatically. Restart Orion after changing anything
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `wakeword.model` | `hey_jarvis` | Built-in model name, or path to a custom `.onnx` |
+| `wakeword.models` | `[hey_jarvis]` | Wake word models; any of them wakes Orion. Built-in names or paths to `.onnx` files |
+| `wakeword.phrase` | `null` | What Orion tells people to say (default: the first model's name) |
 | `wakeword.threshold` | `0.5` | Lower (e.g. `0.35`) = triggers more easily, more false alarms |
+| `wakeword.thresholds` | `{}` | Per-model overrides, e.g. `{hey_orion: 0.6}` |
 | `wakeword.cooldown_s` | `1.5` | Ignore the wake word briefly after it fires |
 
 ### Listening
@@ -693,7 +704,7 @@ gets noted. Later phases add real data sources and fine-tuning.
 
 ## 18. Known limitations
 
-- The wake word is **"hey jarvis"** until Phase 6.
+- The wake word is **"hey jarvis"** until you train "hey orion" ([wake-word.md](wake-word.md)).
 - **No spoken shutdown yet.** Use Ctrl+C. "Orion, shut down" and the wipe arrive in Phase 2.5.
 - **Interrupting by just talking** (`barge_in: voice`) isn't reliable through
   laptop speakers yet, so the default is "hey jarvis" to interrupt.

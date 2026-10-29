@@ -13,7 +13,7 @@ from audio.devices import Microphone
 from audio.stt import SpeechToText
 from audio.tts import Chimes, Speaker
 from audio.vad import Endpointer, Status
-from audio.wakeword import WakeWordDetector
+from audio.wakeword import WakeWordDetector, strip_wake_phrase
 from brain import profanity
 from core.assistant import Assistant, sorry
 from core import feedback
@@ -38,7 +38,8 @@ class VoiceLoop:
                  stt: SpeechToText, assistant: Assistant, speaker: Speaker,
                  chimes: Chimes | None, identity: Identity, people: People | None,
                  follow_up_s: float = 6.0, show: Callable[[str], None] = print,
-                 notes: TrainingNotes | None = None, barge_in: BargeIn | None = None) -> None:
+                 notes: TrainingNotes | None = None, barge_in: BargeIn | None = None,
+                 wake_phrases: list[str] | None = None) -> None:
         self.mic = mic
         self.wake = wake
         self.endpointer = endpointer
@@ -52,6 +53,7 @@ class VoiceLoop:
         self.show = show
         self.notes = notes or TrainingNotes(None)
         self.barge_in = barge_in
+        self.wake_phrases = wake_phrases or ["hey jarvis"]
         self._prefill: list[np.ndarray] = []   # user speech captured by a barge-in
         frames = max(1, int(self.WAKE_AUDIO_S * 1000 / endpointer.chunk_ms))
         self._recent: deque[np.ndarray] = deque(maxlen=frames)
@@ -177,6 +179,7 @@ class VoiceLoop:
         turn.extra["follow_up"] = follow_up
         turn.extra["speaker_known"] = user is not None
         heard.audio = None  # done with the audio
+        heard.text = strip_wake_phrase(heard.text, self.wake_phrases)
 
         if not heard.text:
             # Background noise in a follow-up window just closes it quietly.

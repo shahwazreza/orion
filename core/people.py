@@ -7,6 +7,7 @@ are kept; the audio and what was said are discarded.
 
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 
@@ -69,7 +70,7 @@ class People:
 
     def __init__(self, store: UserStore, identity: Identity, enroll_target_s: float = 10.0,
                  min_answer_s: float = 1.0, duplicate_voice_score: float = 0.7,
-                 verify_threshold: float = 0.55) -> None:
+                 verify_threshold: float = 0.55, wake_phrase: str = "hey jarvis") -> None:
         self.store = store
         self.identity = identity
         self.enroll_target_s = enroll_target_s
@@ -79,6 +80,7 @@ class People:
         # 100 strangers through (scripts/voice_eval.py). Anything that changes who
         # Orion trusts needs this stronger match on the request itself.
         self.verify_threshold = verify_threshold
+        self.wake_phrase = wake_phrase
         self._returning: User | None = None   # set when a "new" person is a voiceless existing one
 
     # ---- onboarding -------------------------------------------------------
@@ -222,6 +224,26 @@ class People:
         return True
 
     # ---- commands ---------------------------------------------------------
+    def _find_named(self, spoken: str) -> User | None:
+        """A saved person named in a command, allowing for how Whisper spells names.
+
+        Seen live: the profile "Bye" was heard as "by", so "delete Bye" never
+        matched. An exact match wins; otherwise the closest-sounding saved name.
+        Commands that act on the result always confirm the name out loud first.
+        """
+        exact = self.store.find(spoken)
+        if exact is not None:
+            return exact
+        names = {u.name.lower(): u for u in self.store.all()}
+        close = difflib.get_close_matches(spoken.strip().lower(), names, n=1, cutoff=0.75)
+        if close:
+            return names[close[0]]
+        # Sound-alikes spelled differently ("buy" / "by" / "Bye"): compare consonant
+        # skeletons, but only when exactly one saved name fits.
+        skeleton = _skeleton(spoken)
+        fits = [u for n, u in names.items() if skeleton and _skeleton(n) == skeleton]
+        return fits[0] if len(fits) == 1 else None
+
     def _verified(self, dialog: Dialog, user: User) -> bool:
         """Is this request clearly from ``user``? Speaks a retry hint if not.
 
@@ -236,8 +258,8 @@ class People:
             return True
         log.info("Sensitive request not verified (confidence %s)",
                  "n/a" if c is None else f"{c:.2f}")
-        dialog.say(f"For that I need to be sure it's you, {user.name}. Say hey jarvis, then "
-                   "ask again in a full sentence, close to the mic.")
+        dialog.say(f"For that I need to be sure it's you, {user.name}. Say {self.wake_phrase}, "
+                   "then ask again in a full sentence, close to the mic.")
         return False
 
     def handle(self, heard: Heard, dialog: Dialog) -> bool:
@@ -254,8 +276,11 @@ class People:
                 dialog.say("I don't know yet.")
             return True
 
-        if re.search(r"\b(who do you know|who have you met|who (all )?do you recogni[sz]e|"
-                     r"list (the )?(users|people|profiles))\b", t):
+        if re.search(r"\bwho (else |all )?(do you|have you|can you) (know|met|recogni[sz]e)\b|"
+                     r"\b(list|name|tell me|give me|show me|read out)( me)?( all| every)?( of)?( the)? "
+                     r"(users|people|profiles|persons|everyone|everybody|names)\b|"
+                     r"\b(how many|which|what) (people|users|profiles) (do you|have you)\b|"
+                     r"\b(people|users|everyone|everybody) (you know|you('ve| have) met)\b", t):
             names = [u.name for u in self.store.all()]
             if not names:
                 dialog.say("I haven't met anyone yet.")
@@ -288,7 +313,7 @@ class People:
                 return True
             if not self._verified(dialog, user):
                 return True
-            target = self.store.find(m.group(1))
+            target = self._find_named(_strip_name_filler(m.group(1)))
             if target is None:
                 dialog.say(f"I don't know anyone called {m.group(1).title()}.")
                 return True
@@ -335,10 +360,13 @@ class People:
                 dialog.say(f"Okay, I'll stick with {user.name}.")
             return True
 
-        m = re.search(r"\b(?:delete|remove|forget) (?!my\b|me\b|who\b|that\b|it\b|everything\b)"
+        # "do lead" / "the lead": how Whisper has heard "delete" from across the room.
+        m = re.search(r"\b(?:delete|deleted|do lead|the lead|remove|forget) "
+                      r"(?!my\b|me\b|who\b|that\b|it\b|everything\b)"
                       r"(\w[\w' -]*?)(?:'s (?:profile|voice(?:print)?))?$", t)
-        if m and self.store.find(m.group(1)) is not None:
-            target = self.store.find(m.group(1))
+        named = self._find_named(_strip_name_filler(m.group(1))) if m else None
+        if m and named is not None:
+            target = named
             if user is None or not user.is_owner:
                 dialog.say("Only the owner can delete other people.")
                 return True
@@ -357,8 +385,7 @@ class People:
                 return True
 
         if re.search(r"\b(delete|remove|forget) (my (profile|voice(print)?|account)|me|who i am)\b", t) or (
-                m is not None and user is not None and self.store.find(m.group(1)) is not None
-                and self.store.find(m.group(1)).id == user.id):
+                m is not None and user is not None and named is not None and named.id == user.id):
             if user is None:
                 dialog.say("I don't recognise your voice, so there's nothing to delete.")
                 return True
@@ -375,6 +402,19 @@ class People:
             return True
 
         return False
+
+
+def _strip_name_filler(spoken: str) -> str:
+    """"the user by" / "the person called Joe" / "profile Joe" -> the name part."""
+    return re.sub(r"^(?:the )?(?:user|person|profile|account|member|guy|one)s?"
+                  r"(?: (?:called|named))?\s+|^(?:someone|somebody) (?:called|named)\s+",
+                  "", spoken.strip())
+
+
+def _skeleton(name: str) -> str:
+    """First letter plus remaining consonants: "Bye", "by", "buy" -> "b"."""
+    w = re.sub(r"[^a-z]", "", name.lower())
+    return w[:1] + re.sub(r"[aeiouyhw]", "", w[1:]) if w else ""
 
 
 def _join(names: list[str]) -> str:

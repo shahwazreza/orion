@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import logging
 import os
 import sys
@@ -336,7 +337,7 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
     from audio.devices import AudioDeviceError, Microphone
     from audio.stt import make_stt
     from audio.vad import Endpointer, SileroVAD
-    from audio.wakeword import WakeWordDetector, wakeword_model_path
+    from audio.wakeword import WakeWordDetector, model_specs, wakeword_model_path
     from audio.speaker_id import SherpaSpeakerEncoder
     from core.metrics import memory_snapshot
     from core.people import People
@@ -346,9 +347,11 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
     ww = cfg.section("wakeword")
     try:
         with timed("Wake word"):
+            specs = model_specs(ww)
             wake = WakeWordDetector(
-                wakeword_model_path(ww["model"], models_dir, cfg.root), models_dir,
+                [wakeword_model_path(s, models_dir, cfg.root) for s in specs], models_dir,
                 threshold=ww.get("threshold", 0.5), cooldown_s=ww.get("cooldown_s", 1.5),
+                thresholds=ww.get("thresholds"),
             )
         endpointer = Endpointer(
             SileroVAD(models_dir / "openwakeword" / "silero_vad.onnx"),
@@ -384,7 +387,10 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
             return 1
 
     log.info("Memory: %s", memory_snapshot())
-    phrase = ww["model"].replace("_", " ") if not str(ww["model"]).endswith(".onnx") else "the wake word"
+    # Phrases the models listen for, e.g. "hey jarvis", "hey orion"; the first (or
+    # wakeword.phrase) is the one Orion tells people to say.
+    heard_phrases = [Path(s).stem.split("_v")[0].replace("_", " ") for s in specs]
+    phrase = ww.get("phrase") or heard_phrases[0]
     barge = None
     conv = cfg.section("conversation")
     mode = conv.get("barge_in", "wake_word")
@@ -406,10 +412,11 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
 
     identity = make_identity(cfg, store, encoder)
     people = People(store, identity, enroll_target_s=people_cfg.get("enroll_target_s", 10.0),
-                    verify_threshold=people_cfg.get("verify_threshold", 0.55)) if encoder else None
+                    verify_threshold=people_cfg.get("verify_threshold", 0.55),
+                    wake_phrase=phrase) if encoder else None
     loop = VoiceLoop(mic, wake, endpointer, stt, assistant, speaker, chimes, identity, people,
                      follow_up_s=cfg.get("conversation.follow_up_s", 6.0), notes=notes,
-                     barge_in=barge)
+                     barge_in=barge, wake_phrases=heard_phrases)
     try:
         if relearn:
             mic.start()
