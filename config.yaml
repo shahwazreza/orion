@@ -36,11 +36,14 @@ common:
 
   wakeword:
     # Built-in names or paths to custom .onnx models; any of them wakes Orion.
-    # After training (docs/wake-word.md):  models: [models/openwakeword/hey_orion.onnx, hey_jarvis]
-    models: [hey_jarvis]
-    phrase: null            # what Orion tells people to say; null = the first model's name
+    # hey_orion was trained with notebooks/train_hey_orion.ipynb (docs/wake-word.md).
+    # To keep "hey jarvis" as a backup: [models/openwakeword/hey_orion.onnx, hey_jarvis]
+    models: [models/openwakeword/hey_orion.onnx]
+    phrase: hey orion       # what Orion tells people to say
     threshold: 0.5
-    thresholds: {}          # per-model overrides, e.g. {hey_orion: 0.6}
+    # Synthetic check (2026-10-29): "hey orion" 0.04-0.95 across voices; closest
+    # sound-alike "hey brian" 0.46. Tune from: python scripts/wakeword_test.py
+    thresholds: {hey_orion: 0.5}
     cooldown_s: 1.5         # ignore re-triggers right after a detection
 
   conversation:
@@ -92,6 +95,8 @@ common:
     language: en
     beam_size: 1            # greedy decoding: much faster, small accuracy cost
     cpu_threads: 0          # 0 = library default
+    hotwords: []            # extra words Whisper should expect (Orion, Claude and known people's
+                            # names are added automatically), e.g. [Moffitt, USF]
 
   llm:
     backend: ollama

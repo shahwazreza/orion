@@ -41,7 +41,7 @@ details (architecture, tests, benchmarks), see the [README](../README.md).
 
 **He can:**
 
-- Wake up when you say **"hey jarvis"**, listen until you stop talking, and answer
+- Wake up when you say **"hey orion"**, listen until you stop talking, and answer
   out loud.
 - Keep a conversation going: after he answers, you can just keep talking for a
   few seconds without saying the wake word again.
@@ -172,9 +172,9 @@ can read.
 
 ### A conversation, step by step
 
-1. Say **"hey jarvis"**. *(A placeholder. A custom "hey orion" is trained with a Colab
-   notebook, tested on your voice with `scripts/wakeword_test.py`, and switched on in
-   `config.yaml`; both can work during the changeover. See [wake-word.md](wake-word.md).)*
+1. Say **"hey orion"**. *(A custom wake word, trained with a Colab notebook. Check how well it
+   hears you with `scripts/wakeword_test.py`, and see [wake-word.md](wake-word.md) to tune
+   or retrain it.)*
 2. You hear a **rising chime**: he's recording.
 3. Speak normally. When you stop for about 5 seconds, a **falling chime** means
    he's stopped recording.
@@ -182,9 +182,9 @@ can read.
 5. You hear a **soft single note**: he's still listening. Ask a follow-up
    without the wake word, within 10 seconds.
 6. To end, stay silent or say something like **"thanks, that's all"**. You hear
-   the falling chime and he goes back to waiting for "hey jarvis".
+   the falling chime and he goes back to waiting for "hey orion".
 
-You don't need to pause after the wake word: "Hey jarvis, what time is it in
+You don't need to pause after the wake word: "Hey orion, what time is it in
 Tokyo?" works in one breath. The wake phrase is removed before your request is
 answered, so he won't comment on what you called him.
 
@@ -205,8 +205,8 @@ recorded or transcribed until the rising chime.
 
 | Setting | What interrupts him |
 |---|---|
-| `wake_word` (default) | "Hey jarvis" |
-| `voice` | Anyone talking over him, or "hey jarvis". What you say becomes your next request. Needs echo cancellation (below) |
+| `wake_word` (default) | "Hey orion" |
+| `voice` | Anyone talking over him, or "hey orion". What you say becomes your next request. Needs echo cancellation (below) |
 | `off` | Nothing; he always finishes |
 
 In `voice` mode his microphone also hears his own voice from the speakers. He
@@ -234,7 +234,7 @@ or just "thanks" / "thank you" on its own.
   mid-sentence, see section 17.
 - He waits up to 6 seconds for you to start talking after the wake word, and
   records at most 60 seconds in one go.
-- **You can interrupt him:** say **"hey jarvis"** while he's talking. He stops
+- **You can interrupt him:** say **"hey orion"** while he's talking. He stops
   within a moment and listens. See [Interrupting Orion](#interrupting-orion).
 - Answers are short on purpose (one to three sentences). Ask for more detail
   if you want it.
@@ -307,7 +307,7 @@ Orion can know several people and tell them apart by voice.
 
 ### Adding someone
 
-1. The **owner** says "hey jarvis, add a new person".
+1. The **owner** says "hey orion, add a new person".
 2. Orion asks the new person to come close, then asks their name, confirms it,
    and asks their permission to learn their voice, exactly as in section 4.
 3. Everyone added after the owner is a **member**.
@@ -361,7 +361,7 @@ itself**:
 - relearning your own voice, renaming yourself, deleting your profile
 
 If the match isn't clear, he says *"For that I need to be sure it's you…"*.
-Say "hey jarvis" and ask again in a full sentence, close to the mic. Being
+Say "hey orion" and ask again in a full sentence, close to the mic. Being
 recognised earlier in the same conversation isn't enough on its own. Text mode
 is your keyboard, so it skips this check. The level is `people.verify_threshold`.
 
@@ -700,7 +700,7 @@ and the right one is picked automatically. Restart Orion after changing anything
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `wakeword.models` | `[hey_jarvis]` | Wake word models; any of them wakes Orion. Built-in names or paths to `.onnx` files |
+| `wakeword.models` | `[models/openwakeword/hey_orion.onnx]` | Wake word models; any of them wakes Orion. Built-in names or paths to `.onnx` files |
 | `wakeword.phrase` | `null` | What Orion tells people to say (default: the first model's name) |
 | `wakeword.threshold` | `0.5` | Lower (e.g. `0.35`) = triggers more easily, more false alarms |
 | `wakeword.thresholds` | `{}` | Per-model overrides, e.g. `{hey_orion: 0.6}` |
@@ -833,10 +833,11 @@ it gets measured when the board arrives. Full numbers are in
 
 ## 17. Troubleshooting
 
-**He doesn't react to "hey jarvis".**
-Run `python main.py -v` and watch the scores while you say it. Check the right
-mic is selected (`--list-devices`), speak a bit closer, or lower
-`wakeword.threshold` to `0.35`.
+**He doesn't react to "hey orion".**
+Run `python scripts/wakeword_test.py` to see how strongly it hears you. If your scores are
+under 0.5, lower `wakeword.thresholds.hey_orion` to just below your typical score (e.g. `0.4`).
+As a fallback, add `hey_jarvis` to `wakeword.models` so either phrase works.
+Also check the right mic is selected (`--list-devices`) and speak a bit closer.
 
 **He cuts me off mid-sentence.**
 Raise `vad.end_silence_ms` to `1000` or `1200`.
@@ -893,10 +894,13 @@ gets noted. Later phases add real data sources and fine-tuning.
 
 ## 18. Known limitations
 
-- The wake word is **"hey jarvis"** until you train "hey orion" ([wake-word.md](wake-word.md)).
+- **"Hey orion" is a first trained model.** On synthetic voices it was strong for British
+  voices and weak for some American ones. If it often misses you, lower
+  `wakeword.thresholds.hey_orion` (e.g. `0.4`), add `hey_jarvis` back as a backup, or retrain
+  ([wake-word.md](wake-word.md)).
 - **No spoken shutdown yet.** Use Ctrl+C. "Orion, shut down" and the wipe arrive in Phase 2.5.
 - **Interrupting by just talking** (`barge_in: voice`) isn't reliable through
-  laptop speakers yet, so the default is "hey jarvis" to interrupt.
+  laptop speakers yet, so the default is "hey orion" to interrupt.
 - **English only.**
 - **Rules are matched by meaning and sometimes misfire**, especially between similar
   rules ("I'm off" could mean leaving or bed). Correct him and he learns.

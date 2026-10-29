@@ -176,3 +176,13 @@ def test_saving_still_works_when_embeddings_are_down(mem):
 ])
 def test_second_person(text, expected):
     assert to_second_person(text) == expected
+
+
+@pytest.mark.parametrize("text", ["I want you to remember that my favorite food is biryani.",
+                                  "Can you remember that my favorite food is biryani",
+                                  "Make sure you remember my favorite food is biryani"])
+def test_natural_ways_of_asking_to_remember(mem, text):
+    # Live log: "I want you to remember that..." got "I'll make a note" from the model, and nothing was saved.
+    store, cmds, _ = mem
+    handled, said = say(cmds, text)
+    assert handled and [m.text for m in store.all(REZA)] == ["my favorite food is biryani"]

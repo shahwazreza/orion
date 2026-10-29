@@ -213,3 +213,23 @@ def test_no_audit_log_means_no_cloud(setup):
     a, client, local, said, _ = setup
     a.audit = None
     assert ask(a, "anything") == "Local answer." and client.calls == []
+
+
+@pytest.mark.parametrize("heard", ["Cloud Mode on.", "Switch to cloud mode", "clod mode on", "Claude mode, please"])
+def test_claude_mode_on_as_whisper_hears_it(heard):
+    r = Router()
+    assert r.decide(heard, "r").handled and r.in_claude_mode("r")
+
+
+@pytest.mark.parametrize("heard", ["Cloud Mode off!", "Clod mode off.", "back to local", "turn off cloud mode"])
+def test_claude_mode_off_as_whisper_hears_it(heard):
+    # Live log: stuck in Claude mode because "Cloud Mode off" wasn't recognised.
+    r = Router()
+    r.decide("switch to Claude mode", "r")
+    d = r.decide(heard, "r")
+    assert d.handled and not r.in_claude_mode("r") and d.route == LOCAL
+
+
+def test_ask_cloud_is_ask_claude_but_cloud_topics_are_not():
+    assert Router().decide("Ask cloud what octopuses eat", "r").route == CLOUD
+    assert Router().decide("Tell me about cloud computing", "r").route == LOCAL

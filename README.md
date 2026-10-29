@@ -8,13 +8,13 @@ Jetson Orin Nano (aarch64, CUDA), with hardware choices in `config.yaml` profile
 > Status: **Phase 2 built:** permanent memory, conversation memory, standing rules, Claude mode
 > with a privacy guard and encrypted audit log, and agentic web search, all on an encrypted
 > SQLCipher database. On top of **Phase 1** (voice loop, people and voice recognition, barge-in).
-> **Phase 6 in progress:** custom "hey orion" wake word (training notebook ready).
+> **Phase 6 done:** custom "hey orion" wake word, trained with the Colab notebook.
 > Wake word → listen → who's speaking? → transcribe → reply → speak.
 
 ```
                                          ┌─► TitaNet ──────────► who is it? (name, per-person history)
  mic ─► openWakeWord ─► Silero VAD ──────┤
-        "hey jarvis"    end of speech    └─► faster-whisper ───► Ollama (streaming) ─► clause chunker ─► Kokoro / Piper ─► speaker
+        "hey orion"    end of speech    └─► faster-whisper ───► Ollama (streaming) ─► clause chunker ─► Kokoro / Piper ─► speaker
                                              small.en int8       llama3.2:3b                             British male voice
 ```
 
@@ -95,7 +95,7 @@ speech (see Troubleshooting).
 ## Usage
 
 ```bash
-python main.py                  # voice mode: say "hey jarvis", then your request
+python main.py                  # voice mode: say "hey orion", then your request
 python main.py --text           # type; replies are still spoken
 python main.py --text --no-tts  # pure text, for debugging the brain
 python main.py --list-devices   # find your mic / speaker names
@@ -107,7 +107,7 @@ python main.py -v               # debug logging
 Text-mode commands: `/reset` clears the conversation, `/stats` shows the last
 turn's timings, `/quit` exits. Ctrl+C exits either mode.
 
-**Barge-in:** say "hey jarvis" while Orion talks and he stops within ~50 ms
+**Barge-in:** say "hey orion" while Orion talks and he stops within ~50 ms
 (`conversation.barge_in: wake_word`, default). An experimental `voice` mode lets
 you just talk over him: his own echo is told apart from people by speaker
 embedding (his TTS voiceprint plus room echo sampled at startup), two
@@ -256,11 +256,12 @@ wrong tools will be logged automatically once Phase 2 adds the router and tools.
 Samples of every voice saying the same line are generated into `voice-samples/`
 (git-ignored).
 
-The wake word is temporarily **"hey jarvis"** (openWakeWord's pretrained model).
+The wake word is **"hey orion"**, a custom openWakeWord model (Phase 6). It replaced the
+pretrained "hey orion", which can still be added back as a backup.
 To train and switch to **"hey orion"**, see [docs/wake-word.md](docs/wake-word.md):
 a Colab notebook trains it, `scripts/wakeword_test.py` checks it on your voice, and
 `wakeword.models` can run both during the switch. The wake phrase is stripped from
-what you say, so the model never sees "Hey Jarvis, ..." and corrects you.
+what you say, so the model never sees "Hey Orion, ..." and comments on it.
 
 ## Configuration and profiles
 
@@ -392,12 +393,12 @@ update its URL, blank its hash, run the script, then pin the printed hash.
 
 ## Troubleshooting
 
-- **Wake word never triggers:** run `python main.py -v` and watch the logs, try
-  `wakeword.threshold: 0.35`, and check the right mic is selected
-  (`--list-devices`, `arecord -l`). Quick self-test with synthetic speech:
-  `espeak-ng "hey jarvis"` played near the mic. (Piper's British voice is too far
-  from the model's training voices to trigger it; espeak scores 0.99.)
-- **Cuts you off mid-sentence:** raise `vad.end_silence_ms` (e.g. 1000).
+- **Wake word never triggers:** run `python scripts/wakeword_test.py` to see how strongly
+  "hey orion" hears you, then set `wakeword.thresholds.hey_orion` just below your typical score
+  (e.g. 0.4). Check the right mic is selected (`--list-devices`, `arecord -l`). Synthetic
+  voices are a poor guide: espeak's American voices scored 0.04-0.33 while British and Kokoro
+  voices scored 0.52-0.95. If needed, add `hey_jarvis` back to `wakeword.models` or retrain.
+- **Cuts you off mid-sentence:** raise `vad.end_silence_ms`.
 - **"I can't reach Ollama":** `systemctl status ollama` or `ollama serve`.
 - **Doesn't recognise you / mixes people up:** see People → Tuning. Say
   "relearn my voice" with your usual mic and room.
@@ -419,8 +420,8 @@ update its URL, blank its hash, run the script, then pin the printed hash.
 - [ ] Phase 3: Outlook mail and calendar (Microsoft Graph, device code flow, read-only)
 - [ ] Phase 4: Alarms and morning briefing
 - [ ] Phase 5: Local meeting notes
-- [ ] Phase 6: Custom "hey orion" wake word *(Colab training notebook, voice test script,
-  multi-model wake words ready: see [docs/wake-word.md](docs/wake-word.md); waiting on a trained model)*
+- [x] Phase 6: Custom "hey orion" wake word *(trained with the Colab notebook, in use; tune with
+  `scripts/wakeword_test.py`, see [docs/wake-word.md](docs/wake-word.md))*
 - [ ] Phase 7: "Build me something" via sandboxed Claude Code
 - [ ] Phase 8: Orion's own allowlisted inbox
 - [ ] Phase 9: System control via fixed, validated tools under systemd

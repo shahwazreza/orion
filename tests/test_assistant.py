@@ -145,3 +145,14 @@ def test_ollama_down_is_explained():
 def test_ollama_refuses_remote_host():
     with pytest.raises(Exception):
         OllamaBackend("http://10.0.0.2:11434", "m")
+
+
+def test_style_examples_are_marked_as_not_real():
+    from brain.llm import Conversation
+    c = Conversation("SYS")
+    c.examples = [{"role": "user", "content": "holy shit I got the internship"},
+                  {"role": "assistant", "content": "Well done!"}]
+    msgs = c.messages_with("what internship?")
+    note = msgs[3]
+    assert note["role"] == "system" and "made-up examples" in note["content"]
+    assert msgs[-1] == {"role": "user", "content": "what internship?"}

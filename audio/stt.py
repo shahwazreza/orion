@@ -54,6 +54,9 @@ class FasterWhisperSTT:
             self._model = WhisperModel(model, **kwargs)
         self.language = language
         self.beam_size = beam_size
+        # Words Whisper should expect (names it otherwise mishears: "Orion" -> "Ryan",
+        # "Claude" -> "Cloud"). Set by main from the people Orion knows.
+        self.hotwords = lambda: ""
 
     def transcribe(self, audio: np.ndarray, sample_rate: int = 16000) -> str:
         if sample_rate != 16000:
@@ -65,6 +68,7 @@ class FasterWhisperSTT:
             vad_filter=False,               # we already endpointed with Silero
             condition_on_previous_text=False,
             without_timestamps=True,
+            hotwords=self.hotwords() or None,
         )
         parts = [s.text.strip() for s in segments if s.no_speech_prob < self.NO_SPEECH_CUTOFF]
         return " ".join(p for p in parts if p).strip()

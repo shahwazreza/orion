@@ -61,7 +61,8 @@ def _clean(text: str) -> str:
     return text[:1].lower() + text[1:] if first.lower() in _LOWER_FIRST else text
 
 
-_SAVE = re.compile(r"^(?:hey,? |okay,? |so,? |also,? |and )*(?:please )?(?:remember|don't forget|do not forget|"
+_SAVE = re.compile(r"^(?:hey,? |okay,? |so,? |also,? |and )*(?:please |i want you to |i need you to |i'd like you to |"
+                   r"can you |could you |will you |make sure (?:you )?|try to )?(?:remember|don't forget|do not forget|"
                    r"make a note|note)(?: that| this)?[,:]?\s+(.+)$", re.I)
 _SAVE_TO = re.compile(r"^to\s+(.+)$", re.I)       # "remember to call mum" -> a need, not a reminder
 # Lasting facts said in passing are saved too (spec: "lasting facts about me").

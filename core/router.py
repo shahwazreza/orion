@@ -18,14 +18,19 @@ from dataclasses import dataclass
 
 LOCAL, CLOUD = "local", "cloud"
 
+# Whisper doesn't know the word "Claude": live logs show "Cloud mode on", "Clod mode off".
+_CLAUDE = r"(?:claude|claud|cloud|clod|clawed|klaud|clowd)"
+
 # Only connecting words are dropped ("ask Claude to ...", "about ..."); question words stay,
 # or Claude gets "my sister's name is." (seen live).
 _ASK = re.compile(r"^(?:hey,? |okay,? |so,? )?(?:can you |could you |please )?(?:ask|check with|run (?:this|that|it) "
-                  r"(?:by|past)) claude(?: (?:to|about|whether|if|for))?[,:]?\s*(?P<q>.*)$", re.I)
-_MODE_ON = re.compile(r"\b(?:switch|change|go) (?:over )?to claude(?: mode)?\b|\b(?:use|turn on|enable|start|enter) "
-                      r"claude mode\b|\bclaude mode on\b|\blet me talk to claude\b", re.I)
+                  r"(?:by|past)) " + _CLAUDE + r"(?: (?:to|about|whether|if|for))?[,:]?\s*(?P<q>.*)$", re.I)
+_MODE_ON = re.compile(r"\b(?:switch|change|go) (?:over )?to " + _CLAUDE + r"(?: mode)?\b|\b(?:use|turn on|enable|start|enter) "
+                      + _CLAUDE + r" mode\b|\b" + _CLAUDE + r" mode,? (?:on|please)\b|\blet me talk to " + _CLAUDE + r"\b",
+                      re.I)
 _MODE_OFF = re.compile(r"\bback to local\b|\blocal mode\b|\bswitch (?:back )?to local\b|\b(?:turn off|disable|exit|"
-                       r"leave|stop) claude mode\b|\bclaude mode off\b|\bstop using claude\b", re.I)
+                       r"leave|stop) " + _CLAUDE + r" mode\b|\b" + _CLAUDE + r" mode,? off\b|\bstop using " + _CLAUDE + r"\b",
+                       re.I)
 # Explicit, per-request consent to send personal context to Claude.
 _INCLUDE = re.compile(r"\b(?:and |, )?(?:include|use|share|send|tell (?:it|claude))\s+(?:what you know|my memories|"
                       r"what i(?:'ve| have) told you|my notes|my (?:name|details|info))(?: about (?P<topic>[^,.?]+))?",

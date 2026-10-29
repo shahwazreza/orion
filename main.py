@@ -633,6 +633,10 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
         )
         with timed("Whisper STT"):
             stt = make_stt(cfg.section("stt"), models_dir)
+            if hasattr(stt, "hotwords"):
+                extra = cfg.get("stt.hotwords") or []
+                stt.hotwords = lambda: ", ".join(dict.fromkeys(
+                    [cfg.get("assistant.name", "Orion"), "Claude", *extra, *(u.name for u in store.all())]))
             stt.warm_up()
         people_cfg = cfg.section("people")
         encoder = None
