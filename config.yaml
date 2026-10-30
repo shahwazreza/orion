@@ -158,7 +158,7 @@ common:
 
   metrics:
     enabled: true           # timings + memory only; never transcript text
-    file: logs/metrics.jsonl
+    file: logs/metrics.enc  # encrypted; read with: python main.py metrics [N]
 
 # Applied on top of everything with --demo (or ORION_DEMO=1), for IT demos and
 # interviews. Demo mode always keeps language clean, whatever is set here.

@@ -40,14 +40,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # REMAINDER: everything after the command word is passed through, so subcommand
     # options like "secrets set anthropic --clipboard" aren't mistaken for Orion's own.
     p.add_argument("command", nargs=argparse.REMAINDER,
-                   help="optional: users [list | rename OLD NEW | delete NAME | relearn NAME], "
-                        "notes [list | clear]")
+                   help="optional: stop, wipe, killswitch [status | set | test], "
+                        "users [list | rename OLD NEW | delete NAME | relearn NAME], notes [list | clear], "
+                        "secrets [status | set ...], audit [N], metrics [N]")
     return p.parse_args(argv)
 
 
 def setup_logging(verbose: bool) -> None:
-    # Console only for now. Logs never include transcripts; file logging arrives
-    # with encryption in Phase 2.5.
+    # Console only: nothing is written to disk. Logs never include transcripts.
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -92,14 +92,6 @@ def main(argv: list[str] | None = None) -> int:
         log.error("Config error: %s", exc)
         return 2
 
-    from audio.devices import AudioDeviceError
-    from audio.tts import AudioPlayer, Chimes, Speaker, make_tts
-    from brain.llm import LLMError, make_llm
-    from brain.profanity import DEMO, ProfanityPolicy
-    from core.assistant import Assistant
-    from core.metrics import MetricsSink, memory_snapshot
-    from core.net_guard import NetworkPolicyError, exposed_listeners, port_of
-
     relearn = None
     if args.command[:2] == ["users", "relearn"]:
         # Voice learning started from the keyboard: the recovery path when Orion no
@@ -118,8 +110,42 @@ def main(argv: list[str] | None = None) -> int:
             return secrets_cli(args.command[1:])
         if args.command[0] == "audit":
             return audit_cli(cfg, args.command[1:])
-        log.error("Unknown command %r. Try: users list, notes list", args.command[0])
+        if args.command[0] == "stop":
+            return stop_cli()
+        if args.command[0] == "wipe":
+            return wipe_cli(cfg)
+        if args.command[0] == "killswitch":
+            return killswitch_cli(cfg, args.command[1:])
+        if args.command[0] == "metrics":
+            return metrics_cli(cfg, args.command[1:])
+        log.error("Unknown command %r. Try: stop, wipe, killswitch, users, notes, secrets, audit, metrics",
+                  args.command[0])
         return 2
+
+    from core.lifecycle import ProcessFile, install_stop_signal
+
+    pidfile = ProcessFile()
+    other = pidfile.running_pid()
+    if other is not None:
+        log.error("Orion is already running (process %d). Stop it with: python main.py stop", other)
+        return 1
+    pidfile.claim()
+    install_stop_signal()
+    try:
+        return run(args, cfg, relearn)
+    finally:
+        pidfile.release()
+
+
+def run(args, cfg, relearn) -> int:
+    from audio.devices import AudioDeviceError
+    from audio.tts import AudioPlayer, Chimes, Speaker, make_tts
+    from brain.llm import LLMError, make_llm
+    from brain.profanity import DEMO, ProfanityPolicy
+    from core.assistant import Assistant
+    from core.lifecycle import PassphraseHeard, WipeConfirmed
+    from core.metrics import memory_snapshot
+    from core.net_guard import NetworkPolicyError, exposed_listeners, port_of
 
     models_dir = cfg.path("paths.models")
     log.info("Profile: %s", cfg.profile)
@@ -151,13 +177,16 @@ def main(argv: list[str] | None = None) -> int:
 
     name = cfg.get("assistant.name", "Orion")
     speaker = Speaker(tts, player, echo=lambda s: print(f"{name}: {s}", flush=True))
-    metrics = MetricsSink(cfg.path("metrics.file"), enabled=cfg.get("metrics.enabled", True))
+    metrics = open_metrics(cfg)
     policy = ProfanityPolicy(cfg.get("assistant.profanity", "on"))
     if cfg.demo:
         policy.keep_clean(DEMO)
         log.info("Demo mode: clean language")
     store = open_user_store(cfg)
     notes = open_training_notes(cfg)
+    kill_switch = open_kill_switch(cfg)
+    if kill_switch is not None and not kill_switch.is_set:
+        log.warning("No wipe passphrase set yet. Set one with: python main.py killswitch set")
     knowledge = open_knowledge(cfg, llm, store)
     assistant = Assistant(llm, speaker, metrics, cfg.profile, name,
                           max_history_turns=cfg.get("llm.max_history_turns", 8), profanity=policy,
@@ -174,24 +203,237 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("LLM warm-up failed: %s", exc)
         speaker.say(f"{exc.spoken} I'll keep trying when you speak to me.")
 
+    wipe = stopping = False
     try:
         if relearn:
             return run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
                              relearn=relearn, knowledge=knowledge, router=router)
         if args.text:
             log.info("Memory: %s", memory_snapshot())
-            run_text(cfg, assistant, speaker, store, notes, knowledge, router)
+            run_text(cfg, assistant, speaker, store, notes, knowledge, router, kill_switch)
         else:
             return run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
-                             knowledge=knowledge, router=router)
-    except KeyboardInterrupt:
+                             knowledge=knowledge, router=router, kill_switch=kill_switch)
+    except WipeConfirmed:
+        wipe = True
+    except PassphraseHeard:
+        pass                             # heard outside a conversation (e.g. relearning): ignored
+    except KeyboardInterrupt:            # Ctrl+C, "Orion, shut down", or `python main.py stop`
+        stopping = True
         print()
     finally:
+        speaker.interrupt()
         speaker.close()
         if knowledge.log is not None:
-            knowledge.log.close()        # finish indexing the last exchanges
+            # Finish indexing the last exchanges, unless stopping now: startup catches up.
+            knowledge.log.close(timeout=0.5 if stopping or wipe else 10.0)
         if knowledge.db is not None:
             knowledge.db.close()
+        if wipe:
+            make_wipe(cfg).run()         # silent: nothing about it is logged
+    return 0
+
+
+def open_kill_switch(cfg):
+    """The wipe passphrase hash (encrypted), or None if the keyring is unavailable."""
+    from security.keystore import KeyStoreError, get_data_key
+    from security.killswitch import KillSwitch
+    from storage.encrypted_file import DecryptionError, EncryptedJSONFile
+
+    try:
+        key = get_data_key()
+        return KillSwitch(EncryptedJSONFile(cfg.path("paths.data") / "killswitch.enc", key, "killswitch"))
+    except (KeyStoreError, DecryptionError) as exc:
+        log.warning("%s. The wipe passphrase can't be checked this session.", exc)
+        return None
+
+
+def open_metrics(cfg):
+    """Encrypted per-turn timings. Rows from the old plain-text file are moved in, then it's shredded."""
+    import json
+
+    from core.metrics import MetricsSink
+    from security.keystore import KeyStoreError, get_data_key
+    from security.wipe import shred
+    from storage.encrypted_file import EncryptedLines
+
+    if not cfg.get("metrics.enabled", True):
+        return MetricsSink(None, False)
+    try:
+        key = get_data_key()
+    except KeyStoreError as exc:
+        log.warning("%s. Metrics won't be saved.", exc)
+        return MetricsSink(None, False)
+    lines = EncryptedLines(cfg.path("metrics.file"), key, "metrics")
+    old = cfg.path("paths.logs") / "metrics.jsonl"
+    if old.exists():
+        rows = []
+        for row in old.read_text().splitlines():
+            try:
+                rows.append(json.loads(row))
+            except ValueError:
+                continue
+        before = len(lines.read())
+        for row in rows:
+            lines.append(row)
+        if len(lines.read()) - before == len(rows):     # only shred once every row reads back
+            shred(old)
+            log.info("Moved %d plain-text metrics rows into the encrypted log", len(rows))
+    return MetricsSink(lines)
+
+
+def make_wipe(cfg):
+    from security.wipe import Wipe
+
+    return Wipe(cfg.root, cfg.path("paths.data"), cfg.path("paths.logs"))
+
+
+def stop_cli() -> int:
+    from core.lifecycle import ProcessFile, stop_running
+
+    result = stop_running(ProcessFile())
+    print({None: "Orion isn't running.", True: "Orion stopped.",
+           False: "Orion didn't respond, so it was killed."}[result])
+    return 0
+
+
+def wipe_cli(cfg) -> int:
+    """The silent trigger: passphrase with hidden input, then a typed confirmation."""
+    import getpass
+
+    from core.lifecycle import ProcessFile, stop_running
+
+    ks = open_kill_switch(cfg)
+    if ks is None or not ks.is_set:
+        print("No wipe passphrase is set. Set one with: python main.py killswitch set")
+        return 1
+    if ks.locked_for() > 0:
+        print(f"Too many wrong attempts. Try again in {int(ks.locked_for() // 60) + 1} minutes.")
+        return 1
+    if not ks.verify_typed(getpass.getpass("Wipe passphrase (hidden): ")):
+        print("Not accepted.")
+        return 1
+    answer = input("Erase everything Orion knows and all its keys? This can't be undone.\n"
+                   "Type 'confirm wipe': ")
+    if answer.strip().lower() != "confirm wipe":
+        print("Cancelled.")
+        return 1
+    stop_running(ProcessFile())          # a running Orion must not write anything afterwards
+    make_wipe(cfg).run()
+    print("Done. Orion's data and keys are gone. Your code, models, ~/orion-projects and "
+          "~/orion-training are untouched.")
+    return 0
+
+
+def killswitch_cli(cfg, args: list[str]) -> int:
+    """Set or test the wipe passphrase. It is never shown, logged, or stored (only its hash)."""
+    import getpass
+
+    from security.killswitch import problems_with
+
+    ks = open_kill_switch(cfg)
+    if ks is None:
+        print("The system keyring isn't available, so the passphrase can't be stored safely.")
+        return 1
+    action = args[0] if args else "status"
+    if action == "status":
+        if not ks.is_set:
+            print("Wipe passphrase: not set (python main.py killswitch set)")
+        elif ks.locked_for() > 0:
+            print(f"Wipe passphrase: set; typed attempts locked for {int(ks.locked_for() // 60) + 1} more minutes")
+        else:
+            print("Wipe passphrase: set")
+        return 0
+    if action == "set":
+        if ks.is_set:
+            if ks.locked_for() > 0:
+                print("Too many wrong attempts. Try again later.")
+                return 1
+            if not ks.verify_typed(getpass.getpass("Current passphrase (hidden): ")):
+                print("Not accepted.")
+                return 1
+        print("Choose a phrase you'd never say by accident: at least 3 words, words only.\n"
+              "Capitals and punctuation don't matter. Nothing you type is shown.")
+        first = getpass.getpass("New passphrase (hidden): ")
+        issues = problems_with(first)
+        if issues:
+            print("Not saved: " + "; ".join(issues) + ".")
+            return 1
+        if getpass.getpass("Again (hidden): ") != first:
+            print("They didn't match. Not saved.")
+            return 1
+        ks.set(first)
+        print("Saved (only a salted Argon2id hash, inside the encrypted data).\n"
+              "Check that Orion hears it reliably: python main.py killswitch test")
+        return 0
+    if action == "test":
+        return killswitch_test(cfg, ks)
+    print("Usage: python main.py killswitch [status | set | test]")
+    return 2
+
+
+def killswitch_test(cfg, ks, tries: int = 3) -> int:
+    """Say the passphrase a few times: Orion only answers matched / didn't match.
+    Nothing heard is shown or kept. Running Orion is stopped first (it holds the mic)."""
+    from audio.devices import AudioDeviceError, Microphone
+    from audio.stt import make_stt
+    from audio.vad import Endpointer, SileroVAD, Status
+
+    if not ks.is_set:
+        print("No passphrase set yet: python main.py killswitch set")
+        return 1
+    audio, vad, models_dir = cfg.section("audio"), cfg.section("vad"), cfg.path("paths.models")
+    try:
+        stt = make_stt(cfg.section("stt"), models_dir)
+        endpointer = Endpointer(SileroVAD(models_dir / "openwakeword" / "silero_vad.onnx"),
+                                chunk_ms=audio["chunk_ms"], threshold=vad.get("threshold", 0.5),
+                                end_silence_ms=1200, max_utterance_s=15, neg_threshold=vad.get("neg_threshold"))
+        mic = Microphone(audio["sample_rate"], audio["chunk_ms"], audio.get("input_device"))
+        mic.start()
+    except (FileNotFoundError, AudioDeviceError) as exc:
+        print(exc)
+        return 1
+    hits = 0
+    try:
+        for i in range(tries):
+            input(f"[{i + 1}/{tries}] Press Enter, then say your passphrase the way you would to Orion.")
+            mic.drain()
+            endpointer.reset(start_timeout_s=8.0)
+            status = Status.WAITING
+            while status in (Status.WAITING, Status.SPEAKING):
+                frame = mic.read(timeout=1.0)
+                if frame is None:
+                    break
+                status = endpointer.push(frame)
+            if status is Status.TIMEOUT:
+                print("   didn't hear anything")
+                continue
+            ok = ks.matches(stt.transcribe(endpointer.audio(), mic.sample_rate))
+            hits += ok
+            print("   matched" if ok else "   didn't match")
+    finally:
+        mic.close()
+    print(f"{hits} of {tries} matched." + ("" if hits == tries else
+          " If it often doesn't match, choose clearer, more common words (killswitch set)."))
+    return 0
+
+
+def metrics_cli(cfg, args: list[str]) -> int:
+    """Print the last N encrypted metrics rows as JSON lines (timings and memory only)."""
+    import json
+
+    from security.keystore import KeyStoreError, get_data_key
+    from storage.encrypted_file import EncryptedLines
+
+    open_metrics(cfg)                    # moves any old plain-text rows in first
+    try:
+        rows = EncryptedLines(cfg.path("metrics.file"), get_data_key(create=False), "metrics").read()
+    except KeyStoreError as exc:
+        print(f"Can't read metrics: {exc}")
+        return 1
+    n = int(args[0]) if args and args[0].isdigit() else len(rows)
+    for row in rows[-n:]:
+        print(json.dumps(row))
     return 0
 
 
@@ -476,8 +718,9 @@ def make_identity(cfg, store, encoder):
                     adapt_min_audio_s=p.get("adapt_min_audio_s", 2.0))
 
 
-def run_text(cfg, assistant, speaker, store, notes, knowledge=None, router=None) -> None:
+def run_text(cfg, assistant, speaker, store, notes, knowledge=None, router=None, kill_switch=None) -> None:
     """Text mode is the owner's terminal, so it acts as the owner."""
+    from core.lifecycle import Shutdown, WipeConfirmed, is_shutdown, is_wipe_confirmation
     from core.dialog import TextDialog
     from core.metrics import TurnMetrics
     from core.people import People
@@ -509,6 +752,15 @@ def run_text(cfg, assistant, speaker, store, notes, knowledge=None, router=None)
             continue
         if line in ("/quit", "/exit"):
             return
+        if kill_switch is not None and kill_switch.matches(line):
+            # Typed passphrase (visible as you type it; `python main.py wipe` hides it).
+            answer = input("Wipe everything I know? Type 'confirm wipe': ")
+            if is_wipe_confirmation(answer):
+                raise WipeConfirmed()
+            print("Cancelled.")
+            continue
+        if is_shutdown(line):
+            raise Shutdown()
         if line == "/reset":
             assistant.conversation_for(identity.current).clear()
             print("(conversation cleared)")
@@ -601,7 +853,7 @@ def users_cli(cfg, args: list[str]) -> int:
 
 
 def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
-              relearn: str | None = None, knowledge=None, router=None) -> int:
+              relearn: str | None = None, knowledge=None, router=None, kill_switch=None) -> int:
     from audio.devices import AudioDeviceError, Microphone
     from audio.stt import make_stt
     from audio.vad import Endpointer, SileroVAD
@@ -695,6 +947,7 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
         loop.rules = knowledge.rules
     loop.router = router
     loop.audit = getattr(router, "audit", None)
+    loop.kill_switch = kill_switch
     from core.dialog import yes_no
 
     def confirm(prompt):

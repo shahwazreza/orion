@@ -129,3 +129,23 @@ Turbo's small decoder doesn't help on a CPU: its 32-layer encoder dominates. The
 now uses `medium.en` (fewer errors in noise, ~3 s slower); the Jetson should run `large-v3-turbo`
 on its GPU. ~400 words in total, so differences of 1-2% are a handful of words; the speed gaps
 are the reliable part.
+
+## Phase 2.5 — kill switches (laptop, 2026-10-29)
+
+**Passphrase check per utterance:** Argon2id at OWASP parameters (19 MiB, t=2, p=1) takes
+35 ms per check (64 MiB/t=3 took 198 ms). Usually one check per utterance; up to four when
+"Orion" is said before or after it.
+
+**Command phrases through Whisper `medium.en`:** six Kokoro voices (British and American,
+male and female), each phrase synthesised, resampled to 16 kHz, transcribed, then matched.
+
+| Phrase | Recognised |
+|---|---|
+| "Confirm wipe." | 6/6 |
+| "Orion, shut down." | 6/6 |
+| "Shut down." | 6/6 |
+| "Orion, stop listening." | 6/6 |
+| "Start listening." | 6/6 |
+| "Orion, start listening." | 6/6 |
+
+Synthetic voices are cleaner than a real room; the live test is still to come.
