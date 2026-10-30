@@ -10,6 +10,9 @@ from brain.llm import LLMError, OllamaBackend
 from brain.profanity import ProfanityPolicy
 from core.assistant import Assistant
 from core.metrics import MetricsSink, TurnMetrics
+from storage.encrypted_file import EncryptedLines
+
+KEY = bytes(range(32))
 from storage.users import User
 
 
@@ -43,7 +46,7 @@ def make_assistant(tmp_path, spoken):
     def _make(llm):
         speaker = Speaker(tts=None, player=None, echo=spoken.append)
         speakers.append(speaker)
-        metrics = MetricsSink(tmp_path / "m.jsonl")
+        metrics = MetricsSink(EncryptedLines(tmp_path / "m.enc", KEY, "metrics"))
         # Language mode off here: these tests are about history, not few-shot examples.
         return Assistant(llm, speaker, metrics, "test", max_history_turns=2,
                          profanity=ProfanityPolicy("off"))
@@ -103,12 +106,14 @@ def test_unknown_speaker_gets_no_name_and_guest_history_is_dropped(make_assistan
     assert len(llm.seen) == 2
 
 
-def test_metrics_file_never_contains_conversation_text(make_assistant, tmp_path):
+def test_metrics_are_encrypted_and_never_contain_conversation_text(make_assistant, tmp_path):
     a = make_assistant(FakeLLM(["My secret reply."]))
     a.respond("my private question", TurnMetrics("text"))
-    raw = (tmp_path / "m.jsonl").read_text()
-    assert "secret" not in raw and "private" not in raw
-    assert json.loads(raw)["mode"] == "text"
+    raw = (tmp_path / "m.enc").read_bytes()
+    assert b"mode" not in raw and b"text" not in raw                # encrypted on disk
+    rows = EncryptedLines(tmp_path / "m.enc", KEY, "metrics").read()
+    assert rows[0]["mode"] == "text"
+    assert "secret" not in json.dumps(rows) and "private" not in json.dumps(rows)
 
 
 def _ollama(handler):
@@ -145,3 +150,14 @@ def test_ollama_down_is_explained():
 def test_ollama_refuses_remote_host():
     with pytest.raises(Exception):
         OllamaBackend("http://10.0.0.2:11434", "m")
+
+
+def test_style_examples_are_marked_as_not_real():
+    from brain.llm import Conversation
+    c = Conversation("SYS")
+    c.examples = [{"role": "user", "content": "holy shit I got the internship"},
+                  {"role": "assistant", "content": "Well done!"}]
+    msgs = c.messages_with("what internship?")
+    note = msgs[3]
+    assert note["role"] == "system" and "made-up examples" in note["content"]
+    assert msgs[-1] == {"role": "user", "content": "what internship?"}

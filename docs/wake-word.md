@@ -24,11 +24,38 @@ What the notebook does:
 |---|---|
 | Generate | Piper TTS (LibriTTS, hundreds of voices) says "hey orion" 50,000 times with varied speed and intonation, plus similar-sounding phrases ("hey ryan", "o'brien") to learn what *not* to react to |
 | Augment | Mixes in real room echoes (MIT impulse responses) and background audio (AudioSet) |
-| Train | A small network against ~2,000 hours of general audio (ACAV100M features), targeting at most 0.2 false activations per hour |
-| Export | ONNX only. The TensorFlow Lite step is removed because its pinned TensorFlow no longer installs on Colab |
+| Train | A small network (64 units) against ~2,000 hours of general audio (ACAV100M features), targeting at most 0.5 false activations per hour |
+| Export | ONNX only, with PyTorch's classic exporter. The TensorFlow Lite step is removed because its pinned TensorFlow no longer installs on Colab |
 
 Versions are pinned: openWakeWord **v0.6.0** (what Orion runs), piper-sample-generator
 commit `f1988a4`, and the TTS checkpoint is verified by SHA-256 before it's loaded.
+
+**Why the training targets:** the first full run used openWakeWord's defaults (0.2 false
+activations per hour, 32 units) and reached only **49% recall** with 0.97 false activations
+per hour on the validation set. Aiming for 0.2 makes the trainer keep boosting the weight on
+negatives at the cost of recall. The notebook now aims for 0.5 with a 64-unit network;
+false alarms are then tuned with Orion's per-model threshold (`wakeword.thresholds`).
+
+### Compatibility fixes built into the notebook
+
+Each was found running the pipeline on current Colab (Python 3.13, recent PyTorch):
+
+| Problem | Fix |
+|---|---|
+| `acoustics` uses `scipy.special.sph_harm`, removed in SciPy 1.15 | `scipy<1.15` |
+| PyTorch 2.6+ refuses to load the pickled TTS checkpoint | SHA-256 verified, then `weights_only=False` |
+| TFLite export needs `tensorflow-cpu==2.8.1` (no longer installable) | ONNX only |
+| PyTorch's new default ONNX exporter crashed the export after training | `dynamo=False` (classic exporter) + `onnxscript` |
+| Colab can't import a `pip install -e` package until the runtime restarts | Cloned openWakeWord added to `sys.path` |
+| torchaudio 2.9+ removed `torchaudio.info` and moved `torchaudio.load` | A soundfile-based shim, loaded in every process |
+| Step 7 skips itself if any feature file exists, so a crash left the rest missing | Checks all four files and redoes the step if needed |
+
+### Changing the notebook
+
+The notebook is generated: edit `scripts/wakeword/build_notebook.py`, then run
+`python scripts/wakeword/build_notebook.py`. A test fails if the notebook and the
+generator disagree. `--smoke smoke.py` also writes a tiny local test run of the same
+cells (it runs third-party training code, so use a throwaway environment).
 
 ## 2. Test it with your voice
 
@@ -65,7 +92,7 @@ correct you about his name either way.
 
 **Tuning from the test:** if `hey_orion` misses you, lower its threshold (e.g.
 `0.4`). If it fires on its own, raise it (`0.6`) or retrain with more
-`NEGATIVE_PHRASES` and a higher `N_SAMPLES`.
+`NEGATIVE_PHRASES`, a higher `N_SAMPLES`, or a lower `TARGET_FP_PER_HOUR`.
 
 ## Limitations
 

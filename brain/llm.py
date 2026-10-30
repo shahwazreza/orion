@@ -154,10 +154,17 @@ class Conversation:
         self.system_prompt = system_prompt
         self.max_turns = max_turns
         self.examples: list[Message] = []   # few-shot turns, shown before the real history
+        self.context: str = ""              # per-turn extra system context (memories, past talk)
         self._turns: list[Message] = []
 
     def messages_with(self, user_text: str) -> list[Message]:
-        return [{"role": "system", "content": self.system_prompt}, *self.examples, *self._turns,
+        system = self.system_prompt + (f"\n{self.context}" if self.context else "")
+        # Style examples are shown as chat turns (the 3B model imitates those best), but
+        # live logs showed it treating them as real ("you just told me you got the
+        # internship"), so they're explicitly marked as made up.
+        note = ([{"role": "system", "content": "The exchanges above are made-up examples of tone only. "
+                  "None of them happened; the real conversation starts now."}] if self.examples else [])
+        return [{"role": "system", "content": system}, *self.examples, *note, *self._turns,
                 {"role": "user", "content": user_text}]
 
     def commit(self, user_text: str, reply: str) -> None:

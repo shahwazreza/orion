@@ -5,16 +5,17 @@ assistant. Speech recognition, language model, and speech synthesis all run on t
 device. The same code runs on an x86_64 Fedora laptop (CPU only) and an NVIDIA
 Jetson Orin Nano (aarch64, CUDA), with hardware choices in `config.yaml` profiles.
 
-> Status: **Phase 1 complete:** voice loop, learning people and recognising their voices,
-> barge-in, honest answers about what Orion can't do yet. **Phase 6 in progress:** custom
-> "hey orion" wake word (training notebook ready).
+> Status: **Phase 2 built:** permanent memory, conversation memory, standing rules, Claude mode
+> with a privacy guard and encrypted audit log, and agentic web search, all on an encrypted
+> SQLCipher database. On top of **Phase 1** (voice loop, people and voice recognition, barge-in).
+> **Phase 6 done:** custom "hey orion" wake word, trained with the Colab notebook.
 > Wake word → listen → who's speaking? → transcribe → reply → speak.
 
 ```
                                          ┌─► TitaNet ──────────► who is it? (name, per-person history)
  mic ─► openWakeWord ─► Silero VAD ──────┤
-        "hey jarvis"    end of speech    └─► faster-whisper ───► Ollama (streaming) ─► clause chunker ─► Kokoro / Piper ─► speaker
-                                             small.en int8       llama3.2:3b                             British male voice
+        "hey orion"    end of speech    └─► faster-whisper ───► Ollama (streaming) ─► clause chunker ─► Kokoro / Piper ─► speaker
+                                             medium.en int8      llama3.2:3b                             British male voice
 ```
 
 **Using Orion:** see the [user manual](docs/user-manual.md) for every command,
@@ -48,13 +49,13 @@ config.yaml          common settings + per-device profiles (laptop, jetson, ...)
 core/                config & profile detection, hardware probe, metrics, network
                      guard, turn orchestration, voice loop, identity (who's speaking),
                      people (onboarding + people commands), barge-in, feedback
-                     ("that was wrong"), dialog helpers
+                     ("that was wrong"), dialog helpers, lifecycle (shutdown, mute, stop)
 audio/               mic, wake word, VAD/endpointing, STT, speaker recognition,
                      TTS (Kokoro, Piper) + pipelined playback + chimes
 brain/               LLM backends + history, persona prompt, speech text cleanup,
                      language modes (profanity), capability guard (honest "can't yet")
 storage/             encrypted JSON files (AES-GCM), user store, training notes
-security/            data key in the system keyring
+security/            data key in the system keyring, wipe passphrase (Argon2id), nuclear wipe
 tools/               placeholder for Phase 2+
 scripts/             download_models.py (hash-pinned), bench.py (latency), voice_eval.py
                      (speaker recognition + endpointing on LibriSpeech), wakeword_test.py
@@ -78,7 +79,7 @@ source venv/bin/activate
 pip install --no-deps -r requirements.txt
 
 # Models: wake word, VAD, speaker recognition, Kokoro and Piper voices (about
-# 575 MB, SHA-256 verified). Whisper small.en (about 465 MB) downloads on first run.
+# 575 MB, SHA-256 verified). Whisper medium.en (about 1.5 GB) downloads on first run.
 python scripts/download_models.py
 
 # Ollama must already be installed with the model pulled:
@@ -94,19 +95,22 @@ speech (see Troubleshooting).
 ## Usage
 
 ```bash
-python main.py                  # voice mode: say "hey jarvis", then your request
+python main.py                  # voice mode: say "hey orion", then your request
 python main.py --text           # type; replies are still spoken
 python main.py --text --no-tts  # pure text, for debugging the brain
 python main.py --list-devices   # find your mic / speaker names
 python main.py --profile jetson # force a profile (or ORION_PROFILE=jetson)
 python main.py --demo           # demo mode for IT demos / interviews (clean language)
 python main.py -v               # debug logging
+python main.py stop             # stop a running Orion (or say "Orion, shut down")
+python main.py killswitch set   # set the wipe passphrase (hidden; do this first)
+python main.py wipe             # nuclear wipe, silent trigger
 ```
 
 Text-mode commands: `/reset` clears the conversation, `/stats` shows the last
 turn's timings, `/quit` exits. Ctrl+C exits either mode.
 
-**Barge-in:** say "hey jarvis" while Orion talks and he stops within ~50 ms
+**Barge-in:** say "hey orion" while Orion talks and he stops within ~50 ms
 (`conversation.barge_in: wake_word`, default). An experimental `voice` mode lets
 you just talk over him: his own echo is told apart from people by speaker
 embedding (his TTS voiceprint plus room echo sampled at startup), two
@@ -114,7 +118,7 @@ consecutive checks, and a transcript-overlap check. Through laptop speakers it
 still triggers on room noise, so it needs echo cancellation (headset,
 speakerphone, or PipeWire echo-cancel).
 
-**Conversation mode:** after Orion answers, he keeps listening for 6 seconds
+**Conversation mode:** after Orion answers, he keeps listening for 10 seconds
 (`conversation.follow_up_s`), so follow-ups don't need the wake word. A soft
 single chime means he's still listening. Stay silent, or say "thanks, that's all",
 to end the conversation. Set `follow_up_s: 0` to require the wake word every time.
@@ -165,6 +169,41 @@ phases keep passphrases and spoken confirmations for that.
 (e.g. 0.35) or say "relearn my voice" in the room and with the mic you normally
 use. Confident matches also refine your voiceprint automatically over time.
 
+## Memory, conversations, rules (Phase 2)
+
+All per person, encrypted in `data/orion.db` (SQLCipher, key derived from the keyring data
+key), with daily encrypted backups (last 30). Used by the local model only.
+
+- **Memory:** "remember that..." and lasting facts said in passing; recalled by meaning
+  (`nomic-embed-text` via Ollama) and given to the local model when relevant.
+- **Conversations:** every exchange saved; recent turns restored after a restart; recall by
+  day ("yesterday") or meaning ("what did I say about my exam?"); daily summaries written by
+  the local model; "don't save this conversation".
+- **Rules:** "whenever X, do Y". Embeddings alone and the 3B model as a yes/no judge both
+  failed in testing (see [benchmarks](docs/benchmarks.md)), so the model writes casual
+  variations of each trigger at creation, drifted ones are dropped, matching uses the closest
+  variation, and guards reject questions, other people and plans. "That was wrong" and "also
+  remind me when I say..." correct it.
+
+Thresholds were calibrated on real embeddings, not guessed (`core/memory.py`,
+`core/conversations.py`, `core/rules.py`).
+
+## Claude mode and web search (Phase 2)
+
+- **Router** (`core/router.py`): local by default; "ask Claude ...", "switch to Claude mode" /
+  "back to local"; optional auto-router off by default. Every decision is logged.
+- **Privacy guard:** cloud requests are built from scratch, with no names, memories, conversations
+  or rules unless the person says "include ..." for that request. Every request is audited
+  exactly as sent (`python main.py audit`), with token cost. No audit log, no cloud.
+- **Claude** (`brain/claude.py`): `claude-opus-5-5`, effort `low`, server-side refusal fallbacks,
+  key from the keyring. Any failure is spoken and answered locally.
+- **Web search** (`core/web_search.py`, `brain/web.py`): local SearXNG container on
+  `127.0.0.1` (`scripts/searxng.sh`) or Brave. Code catches obvious "needs current info"
+  requests; otherwise the local answer's first sentence is held back and searched instead if it
+  admits not knowing. Pages are read with trafilatura, answers name their source, queries are
+  privacy-filtered, pages are untrusted data, and private network addresses are refused.
+  Big questions offer a handoff to Claude with its own web search.
+
 ## Language
 
 Orion is a personal assistant, so he's never offended by swearing and never
@@ -202,7 +241,7 @@ wrong tools will be logged automatically once Phase 2 adds the router and tools.
   The only context kept is an allowlist of facts about the turn (mode, model,
   language mode, reply length, latency), and the code rejects anything else.
 - Encrypted in `data/training_notes.enc` with the keyring key. The nuclear wipe
-  (Phase 2.5) deletes it.
+  deletes it.
 - Only people Orion recognises can add notes. View or clear them with
   `python main.py notes list` and `python main.py notes clear`.
 - Phase 10 uses these notes only to decide which **synthetic** examples to
@@ -220,11 +259,12 @@ wrong tools will be logged automatically once Phase 2 adds the router and tools.
 Samples of every voice saying the same line are generated into `voice-samples/`
 (git-ignored).
 
-The wake word is temporarily **"hey jarvis"** (openWakeWord's pretrained model).
+The wake word is **"hey orion"**, a custom openWakeWord model (Phase 6). It replaced the
+pretrained "hey orion", which can still be added back as a backup.
 To train and switch to **"hey orion"**, see [docs/wake-word.md](docs/wake-word.md):
 a Colab notebook trains it, `scripts/wakeword_test.py` checks it on your voice, and
 `wakeword.models` can run both during the switch. The wake phrase is stripped from
-what you say, so the model never sees "Hey Jarvis, ..." and corrects you.
+what you say, so the model never sees "Hey Orion, ..." and comments on it.
 
 ## Configuration and profiles
 
@@ -255,7 +295,7 @@ python scripts/bench.py --runs 2 --write
 Laptop (i5-10th gen, CPU only), Phase 1 with the Piper voice: **about 3.2 s from
 end of speech to first audio** (STT 1.4 s, LLM first token 0.46 s), with 10/10
 transcripts correct. With the Kokoro voice, add about 2.5 s on this CPU.
-Memory: Orion about 1.0 GB, Ollama about 2.6 GB. Voice mode adds the 1.0 s silence
+Memory: Orion about 1.0 GB, Ollama about 2.6 GB. Voice mode adds the 5 s silence
 window that decides you've finished talking (`vad.end_silence_ms`; it was 0.8 s when
 the latency above was measured).
 
@@ -322,13 +362,31 @@ update its URL, blank its hash, run the script, then pin the printed hash.
 
 ## Security notes
 
-- **Full-disk encryption:** use LUKS on both the laptop and the Jetson's NVMe.
-  Orion encrypts its own data (users and voiceprints now; everything else in
-  Phase 2.5). LUKS protects everything else if a device is lost.
-- **Keyring:** the data key is in KWallet / GNOME Keyring. Deleting the `orion`
-  entry there makes `data/users.enc` permanently unreadable (that's how the
-  Phase 2.5 wipe will work). On the Jetson, a systemd service has no desktop
-  keyring session; Phase 9 will set up a headless key store.
+- **Everything at rest is encrypted** with one 256-bit key held in the system keyring:
+  the database (SQLCipher: memories, conversations, rules, audit log) and its backups,
+  people and voiceprints, training notes, the wipe passphrase hash (AES-256-GCM), and
+  the metrics log (one AES-GCM record per line). Nothing is written to disk in plain text;
+  without the keyring, Orion runs but saves nothing.
+- **Level 1 kill switch:** "Orion, shut down", `python main.py stop`, or Ctrl+C stops
+  everything within about a second (a watchdog forces the exit after 3 s if a network call
+  hangs). `stop` reaches Orion through a process file in `$XDG_RUNTIME_DIR`, never a port.
+  A deliberate stop exits 0, so the Phase 9 service (`Restart=on-failure`) won't restart it.
+- **Level 2 kill switch (nuclear wipe):** a passphrase you set (`killswitch set`, hidden
+  input), stored only as a salted Argon2id hash (OWASP parameters, ~35 ms per check) inside
+  the encrypted data. Every utterance is checked before it's shown, logged, or saved, so the
+  passphrase never reaches the screen, the conversation log, or the model. A match asks for
+  a spoken "confirm wipe"; a non-match has no visible effect. The typed trigger
+  (`python main.py wipe`) locks for 5 minutes after 3 wrong tries, doubling up to a day.
+  The wipe deletes the data key first (crypto-shredding), then overwrites and deletes
+  `data/` and `logs/`, removes the SearXNG container and config, and deletes every `orion`
+  keyring entry (a Secret Service search, so later phases' tokens are included). It never
+  touches the code, models, `~/orion-projects/` or `~/orion-training/`, and is never logged.
+  See `security/wipe.py` and the user manual, section 12d.
+- **Full-disk encryption:** use LUKS on both the laptop and the Jetson's NVMe. On an SSD
+  with btrfs, overwriting a file doesn't reliably destroy the old blocks; destroying the key
+  makes them unreadable, and LUKS protects everything else on the disk.
+- **Keyring:** the data key is in KWallet / GNOME Keyring under `orion`. On the Jetson, a
+  systemd service has no desktop keyring session; Phase 9 will set up a headless key store.
 - Check that Ollama isn't exposed: `ss -ltnp | grep 11434` should show `127.0.0.1`.
   Never set `OLLAMA_HOST=0.0.0.0`.
 
@@ -356,12 +414,12 @@ update its URL, blank its hash, run the script, then pin the printed hash.
 
 ## Troubleshooting
 
-- **Wake word never triggers:** run `python main.py -v` and watch the logs, try
-  `wakeword.threshold: 0.35`, and check the right mic is selected
-  (`--list-devices`, `arecord -l`). Quick self-test with synthetic speech:
-  `espeak-ng "hey jarvis"` played near the mic. (Piper's British voice is too far
-  from the model's training voices to trigger it; espeak scores 0.99.)
-- **Cuts you off mid-sentence:** raise `vad.end_silence_ms` (e.g. 1000).
+- **Wake word never triggers:** run `python scripts/wakeword_test.py` to see how strongly
+  "hey orion" hears you, then set `wakeword.thresholds.hey_orion` just below your typical score
+  (e.g. 0.4). Check the right mic is selected (`--list-devices`, `arecord -l`). Synthetic
+  voices are a poor guide: espeak's American voices scored 0.04-0.33 while British and Kokoro
+  voices scored 0.52-0.95. If needed, add `hey_jarvis` back to `wakeword.models` or retrain.
+- **Cuts you off mid-sentence:** raise `vad.end_silence_ms`.
 - **"I can't reach Ollama":** `systemctl status ollama` or `ollama serve`.
 - **Doesn't recognise you / mixes people up:** see People → Tuning. Say
   "relearn my voice" with your usual mic and room.
@@ -375,14 +433,16 @@ update its URL, blank its hash, run the script, then pin the printed hash.
 
 - [x] Phase 1: Voice loop, conversation follow-ups, natural voice
 - [x] Learn people's names; recognise who's speaking by voice (multi-user)
-- [ ] Phase 2: Router, Claude mode with privacy guard, permanent memory, standing rules
-- [ ] Phase 2.5: Encryption at rest (SQLCipher, keyring), shutdown and wipe kill switches
-  *(started: keyring-held key and AES-GCM files, used for the user store)*
+- [x] Phase 2: Router, Claude mode with privacy guard, web search, permanent memory,
+  conversation memory, standing rules ([spec](docs/specs/phase-2.md)) *(built; awaiting
+  live voice testing)*
+- [x] Phase 2.5: Encryption at rest, shutdown and nuclear-wipe kill switches, mute
+  ([spec](docs/specs/phase-2.5.md)) *(built; awaiting live voice testing)*
 - [ ] Phase 3: Outlook mail and calendar (Microsoft Graph, device code flow, read-only)
 - [ ] Phase 4: Alarms and morning briefing
 - [ ] Phase 5: Local meeting notes
-- [ ] Phase 6: Custom "hey orion" wake word *(Colab training notebook, voice test script,
-  multi-model wake words ready: see [docs/wake-word.md](docs/wake-word.md); waiting on a trained model)*
+- [x] Phase 6: Custom "hey orion" wake word *(trained with the Colab notebook, in use; tune with
+  `scripts/wakeword_test.py`, see [docs/wake-word.md](docs/wake-word.md))*
 - [ ] Phase 7: "Build me something" via sandboxed Claude Code
 - [ ] Phase 8: Orion's own allowlisted inbox
 - [ ] Phase 9: System control via fixed, validated tools under systemd

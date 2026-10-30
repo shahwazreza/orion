@@ -18,3 +18,8 @@ keyring          # data key lives in the system keyring (Secret Service)
 pyyaml
 psutil
 pytest
+anthropic        # Claude mode (Phase 2)
+sqlcipher3-wheels  # encrypted database (Phase 2)
+trafilatura      # main text of web pages (Phase 2)
+argon2-cffi      # wipe passphrase hash (Phase 2.5)
+secretstorage    # wipe: find every Orion keyring entry (Phase 2.5)

@@ -40,7 +40,8 @@ def clean_for_speech(text: str) -> str:
 # Sentence end: terminal punctuation (optionally followed by a closing quote or
 # bracket) then whitespace, or a newline. Common abbreviations are protected.
 _BOUNDARY = re.compile(r"(?<=[.!?])[\"')\]]?\s+|\n+")
-_ABBREV = re.compile(r"\b(?:Mr|Mrs|Ms|Dr|Prof|St|vs|etc|e\.g|i\.e|approx|No)\.$", re.I)
+# Protected: titles, "e.g.", and initials ("Michel H. Devoret" must not split).
+_ABBREV = re.compile(r"\b(?:Mr|Mrs|Ms|Dr|Prof|St|vs|etc|e\.g|i\.e|approx|No|Jr|Sr)\.$|(?:^|\s)[A-Z]\.$", re.I)
 
 
 _CLAUSE = re.compile(r"[,;:]\s+|\s+[—–-]\s+")

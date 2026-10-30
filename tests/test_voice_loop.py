@@ -72,6 +72,7 @@ class Assistant:
         self.heard = []
         self.profanity = ProfanityPolicy("on")
         self.last_turn = None
+        self.web = None
 
     def respond(self, text, turn, user=None):
         self.heard.append(text)
