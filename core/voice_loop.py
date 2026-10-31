@@ -60,6 +60,7 @@ class VoiceLoop:
         self.conversation_commands = None    # core.conversations.ConversationCommands
         self.rule_commands = None            # core.rules.RuleCommands
         self.rules = None                    # core.rules.RuleBook (checked after each reply)
+        self.outlook_commands = None         # core.outlook.OutlookCommands (Phase 3)
         self.router = None                   # core.router.Router (local vs Claude)
         self.audit = None                    # storage.audit.AuditLog
         self.kill_switch = None              # security.killswitch.KillSwitch (the wipe passphrase)
@@ -253,6 +254,9 @@ class VoiceLoop:
         if self.memory_commands is not None and self.memory_commands.handle(heard, self, user):
             return True
         if self.conversation_commands is not None and self.conversation_commands.handle(heard, self, user):
+            return True
+        # Mail and calendar are answered here, locally, before the router: never by Claude.
+        if self.outlook_commands is not None and self.outlook_commands.handle(heard, self, user):
             return True
 
         decision = self._route(heard.text, user)

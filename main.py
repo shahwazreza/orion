@@ -9,6 +9,7 @@
     python main.py notes [list | clear]
     python main.py secrets [set anthropic | status]
     python main.py audit [N]
+    python main.py outlook [status | connect [NAME] | disconnect NAME | test [NAME]]
 """
 
 from __future__ import annotations
@@ -42,7 +43,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("command", nargs=argparse.REMAINDER,
                    help="optional: stop, wipe, killswitch [status | set | test], "
                         "users [list | rename OLD NEW | delete NAME | relearn NAME], notes [list | clear], "
-                        "secrets [status | set ...], audit [N], metrics [N]")
+                        "secrets [status | set ...], audit [N], metrics [N], "
+                        "outlook [status | connect [NAME] | disconnect NAME | test [NAME]]")
     return p.parse_args(argv)
 
 
@@ -118,7 +120,10 @@ def main(argv: list[str] | None = None) -> int:
             return killswitch_cli(cfg, args.command[1:])
         if args.command[0] == "metrics":
             return metrics_cli(cfg, args.command[1:])
-        log.error("Unknown command %r. Try: stop, wipe, killswitch, users, notes, secrets, audit, metrics",
+        if args.command[0] == "outlook":
+            return outlook_cli(cfg, args.command[1:])
+        log.error("Unknown command %r. Try: stop, wipe, killswitch, users, notes, secrets, audit, metrics, "
+                  "outlook",
                   args.command[0])
         return 2
 
@@ -193,6 +198,7 @@ def run(args, cfg, relearn) -> int:
                           memory=knowledge.memory, conversations=knowledge.log)
     router = make_router(cfg, assistant, knowledge)
     assistant.web = make_web_searcher(cfg, llm, store, knowledge, router)
+    assistant.outlook = make_outlook_commands(cfg, assistant, store, getattr(router, "audit", None))
 
     try:
         with timed(f"LLM {llm_cfg['model']}"):
@@ -283,8 +289,10 @@ def open_metrics(cfg):
 
 
 def make_wipe(cfg):
-    from security.wipe import Wipe
+    from security.wipe import SIGN_OUT_HOOKS, Wipe
+    from tools.outlook import sign_out_hook
 
+    SIGN_OUT_HOOKS[:] = [sign_out_hook(cfg.path("paths.data"))]     # step 1: Outlook tokens
     return Wipe(cfg.root, cfg.path("paths.data"), cfg.path("paths.logs"))
 
 
@@ -615,6 +623,170 @@ def make_web_searcher(cfg, llm, store, knowledge, router):
     return web
 
 
+def open_outlook_auth(cfg):
+    """Outlook sign-ins (encrypted token cache), or None when Outlook is off, not set up,
+    or the keyring is unavailable."""
+    from security.keystore import KeyStoreError, get_data_key
+    from storage.encrypted_file import DecryptionError
+    from tools.outlook import OutlookAuth, open_vault
+
+    o = cfg.section("outlook")
+    if not o.get("enabled", True) or not (o.get("client_id") or "").strip():
+        return None
+    try:
+        vault = open_vault(cfg.path("paths.data"), get_data_key())
+    except (KeyStoreError, DecryptionError) as exc:
+        log.warning("%s. Outlook is off this session.", exc)
+        return None
+    return OutlookAuth(o["client_id"].strip(), o.get("tenant", "common"), vault)
+
+
+def make_outlook_commands(cfg, assistant, store, audit):
+    """Mail and calendar commands. Present even when Outlook isn't set up, so Orion can say so."""
+    from core.outlook import Outlook, OutlookCommands
+    from tools.outlook import GraphClient
+
+    o = cfg.section("outlook")
+    if not o.get("enabled", True):
+        log.info("Outlook: off (outlook.enabled: false)")
+        return None
+    auth = open_outlook_auth(cfg)
+    graph = GraphClient(auth, audit=audit, timeout_s=o.get("timeout_s", 15)) if auth is not None else None
+    if auth is None:
+        log.info("Outlook: not set up (outlook.client_id is empty; see the user manual, section Outlook)")
+    else:
+        known = {u.id for u in store.all()}
+        for uid in [uid for uid in auth.vault.connected() if uid not in known]:
+            auth.disconnect(uid)             # that person was deleted: their sign-in goes too
+        names = [u.name for u in store.all() if auth.is_connected(u.id)]
+        log.info("Outlook: %s", f"connected for {', '.join(names)}" if names
+                 else "set up, nobody connected yet (python main.py outlook connect)")
+    outlook = Outlook(auth, graph, configured=auth is not None, strict_voice=bool(o.get("strict_voice", False)),
+                      save_replies=bool(o.get("save_replies", False)))
+
+    def summarize(messages):
+        return "".join(assistant.llm.stream_chat(messages))
+
+    def verified(dialog, user):
+        # Same strong voice match as other sensitive requests; the keyboard is trusted.
+        if not dialog.hears_voice:
+            return True
+        threshold = cfg.get("people.verify_threshold", 0.55)
+        c = getattr(dialog, "identity", None) and dialog.identity.confidence
+        if c is not None and c >= threshold:
+            return True
+        dialog.say(f"For that I need to be sure it's you, {user.name}. Say {cfg.get('wakeword.phrase', 'hey orion')}, "
+                   "then ask again in a full sentence, close to the mic.")
+        return False
+
+    return OutlookCommands(outlook, verified=verified, summarize=summarize, clean_for=assistant.clean_for,
+                           remember=lambda user, q, reply, logged: assistant.remember_tool_exchange(
+                               user, q, reply, logged, route="outlook"))
+
+
+def outlook_cli(cfg, args: list[str]) -> int:
+    """Connect, check, or disconnect Outlook accounts. Never prints tokens or mail content."""
+    import time as _time
+
+    from tools.outlook import GraphClient, OutlookError
+
+    o = cfg.section("outlook")
+    action = args[0] if args else "status"
+    if not o.get("enabled", True):
+        print("Outlook is switched off (outlook.enabled: false in config.yaml).")
+        return 1
+    if not (o.get("client_id") or "").strip():
+        print("Outlook isn't set up: outlook.client_id in config.yaml is empty.\n"
+              "Register an app (free) and paste its Application (client) ID there. Steps: user manual,\n"
+              "section 'Outlook mail and calendar'.")
+        return 1
+    store = open_user_store(cfg)
+    auth = open_outlook_auth(cfg)
+    if auth is None or not store.persistent:
+        print("The system keyring isn't available, so sign-ins can't be stored safely.")
+        return 1
+
+    def person(name: str | None):
+        u = store.find(name) if name else store.owner()
+        if u is None:
+            print(f"No user called {name!r}. See: python main.py users list" if name
+                  else "No owner yet. Start Orion once to meet the owner.")
+        return u
+
+    if action == "status":
+        accounts = auth.vault.connected()
+        users = store.all()
+        if not users:
+            print("No users yet.")
+        for u in users:
+            print(f"  {u.name:<20} " + (f"connected as {accounts[u.id]}" if u.id in accounts else "not connected"))
+        return 0
+    if action == "connect" and len(args) <= 2:
+        u = person(args[1] if len(args) == 2 else None)
+        if u is None:
+            return 1
+        print(f"Connecting Outlook for {u.name} (read-only: mail and calendar).")
+        try:
+            username = auth.connect(u.id, show=print)
+        except OutlookError as exc:
+            print(f"{exc.spoken} {exc}" if str(exc) != exc.spoken else exc.spoken)
+            return 1
+        except Exception as exc:          # offline, or Microsoft rejected the app registration
+            print(f"Couldn't sign in: {exc}")
+            return 1
+        print(f"Connected {u.name} as {username or 'your Microsoft account'}.")
+        return 0
+    if action == "disconnect" and len(args) == 2:
+        u = person(args[1])
+        if u is None:
+            return 1
+        if not auth.disconnect(u.id):
+            print(f"{u.name} wasn't connected.")
+            return 0
+        print(f"Forgot {u.name}'s Outlook sign-in on this computer. To revoke it at Microsoft too, remove\n"
+              "the app at https://account.live.com/consent/Manage (personal) or https://myapps.microsoft.com "
+              "(work or school).")
+        return 0
+    if action == "test" and len(args) <= 2:
+        from core.when import local_now
+        from datetime import timedelta
+
+        u = person(args[1] if len(args) == 2 else None)
+        if u is None:
+            return 1
+        graph = GraphClient(auth, audit=open_audit(cfg), timeout_s=o.get("timeout_s", 15))
+        now = local_now()
+        checks = [("token", lambda: auth.token(u.id) and "ok"),
+                  ("unread count", lambda: graph.unread_count(u.id)),
+                  ("latest 5 emails", lambda: len(graph.latest(u.id, top=5))),
+                  ("events in the next 24 h", lambda: len(graph.events(u.id, now, now + timedelta(days=1))))]
+        failed = False
+        for label, check in checks:
+            t = _time.perf_counter()
+            try:
+                result = check()
+                print(f"  {label:<24} {result!s:<6} {(_time.perf_counter() - t) * 1000:7.0f} ms")
+            except OutlookError as exc:
+                print(f"  {label:<24} FAILED: {exc.spoken}")
+                failed = True
+                break
+        return 1 if failed else 0
+    print("Usage: python main.py outlook [status | connect [NAME] | disconnect NAME | test [NAME]]")
+    return 2
+
+
+def open_audit(cfg):
+    """The encrypted audit log, or None if the database can't be opened."""
+    from security.keystore import KeyStoreError, get_data_key
+    from storage.audit import AuditLog
+    from storage.db import DatabaseError, open_database
+
+    try:
+        return AuditLog(open_database(cfg.path("paths.data"), get_data_key(create=False)))
+    except (KeyStoreError, DatabaseError):
+        return None
+
+
 def secrets_cli(args: list[str]) -> int:
     """Store API keys in the system keyring with hidden input. Never printed."""
     import getpass
@@ -791,6 +963,9 @@ def run_text(cfg, assistant, speaker, store, notes, knowledge=None, router=None,
             continue
         if convo_cmds is not None and convo_cmds.handle(Heard(line), dialog, identity.current):
             continue
+        # Mail and calendar: always local, before the router.
+        if assistant.outlook is not None and assistant.outlook.handle(Heard(line), dialog, identity.current):
+            continue
         decision = router.decide(line, identity.current.id if identity.current else "guest") if router else None
         if decision is not None:
             if router.audit is not None:
@@ -846,6 +1021,9 @@ def users_cli(cfg, args: list[str]) -> int:
             print("Cancelled.")
             return 1
         store.delete(u.id)
+        auth = open_outlook_auth(cfg)
+        if auth is not None and auth.disconnect(u.id):
+            print(f"Forgot {u.name}'s Outlook sign-in.")
         print(f"Deleted {u.name}.")
         return 0
     print("Usage: python main.py users [list | rename OLD NEW | delete NAME]")
@@ -947,6 +1125,7 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
         loop.rules = knowledge.rules
     loop.router = router
     loop.audit = getattr(router, "audit", None)
+    loop.outlook_commands = assistant.outlook
     loop.kill_switch = kill_switch
     from core.dialog import yes_no
 

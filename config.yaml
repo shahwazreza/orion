@@ -137,6 +137,14 @@ common:
     max_rounds: 3           # search -> read -> search again, at most this many times
     page_chars: 2500        # text kept from each page read (fits the local model)
     cache_s: 900            # repeat searches within 15 minutes use the cached results
+  outlook:                  # Phase 3: Outlook mail and calendar, read-only (Microsoft Graph)
+    enabled: true
+    client_id: null         # your app registration's Application (client) ID (not a secret);
+                            # setup steps: user manual, "Outlook mail and calendar"
+    tenant: common          # common = personal and work/school accounts | consumers | organizations | tenant ID
+    strict_voice: false     # true: every Outlook request needs the strong voice match (people.verify_threshold)
+    save_replies: false     # false: the conversation log keeps "(answered from Outlook)", not what was read out
+    timeout_s: 15
   router:
     auto: false             # true: plain general-knowledge questions with nothing personal go to Claude
 
