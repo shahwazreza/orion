@@ -49,6 +49,7 @@ class Assistant:
         self.audit = None               # storage.audit.AuditLog: no audit log, no cloud
         self.cloud_sessions: dict[str, Conversation] = {}   # Claude-mode history, per person
         self.web = None                 # core.web_search.WebSearcher, set by main when enabled
+        self.outlook = None             # core.outlook.OutlookCommands, set by main (Phase 3)
         # Yes/no question to the person (set by the voice loop / text mode).
         self.confirm = lambda prompt: False
         self.log = conversations        # core.conversations.ConversationLog (Phase 2), optional
@@ -99,6 +100,17 @@ class Assistant:
             except Exception:
                 log.exception("Couldn't save the exchange")
 
+    def clean_for(self, user: User | None):
+        """The filter for everything spoken to ``user``: clean language unless swearing is allowed."""
+        return (lambda s: s) if self.may_swear(user) else scrub
+
+    def remember_tool_exchange(self, user: User | None, question: str, reply: str, logged: str,
+                               route: str) -> None:
+        """A command answered outside the model (e.g. Outlook): ``reply`` goes in this chat's
+        history (memory only, for follow-ups), ``logged`` in the encrypted conversation log."""
+        self.conversation_for(user).commit(question, reply)
+        self._remember_exchange(user, question, logged, route=route)
+
     def forget_guest(self) -> None:
         """Unknown speakers don't get to read each other's chat history."""
         self.conversations.pop(GUEST, None)
@@ -110,7 +122,8 @@ class Assistant:
         """
         conversation = self.conversation_for(user)
         conversation.context = self._context_for(user, user_text)
-        refusal = unsupported(user_text, searchable=self.web is not None and self.web.enabled)
+        refusal = unsupported(user_text, searchable=self.web is not None and self.web.enabled,
+                              outlook=self.outlook is not None)
         if refusal is not None:
             # Needs live or personal data Orion doesn't have: never let the model guess.
             self.speaker.begin(on_first_audio=lambda: turn.mark("first_audio"))

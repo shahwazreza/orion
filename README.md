@@ -9,6 +9,8 @@ Jetson Orin Nano (aarch64, CUDA), with hardware choices in `config.yaml` profile
 > with a privacy guard and encrypted audit log, and agentic web search, all on an encrypted
 > SQLCipher database. On top of **Phase 1** (voice loop, people and voice recognition, barge-in).
 > **Phase 6 done:** custom "hey orion" wake word, trained with the Colab notebook.
+> **Phase 3 built:** read-only Outlook mail and calendar (Microsoft Graph, device code sign-in),
+> awaiting live testing with a real account ([spec](docs/specs/phase-3.md)).
 > Wake word → listen → who's speaking? → transcribe → reply → speak.
 
 ```
@@ -31,7 +33,8 @@ caught the 3B model inventing a forecast despite its instructions.
 - **Private by default.** Nothing leaves the machine. Ollama must be on loopback,
   and Orion refuses to start if Ollama is reachable from the network.
 - **Outbound only.** No listening ports, tunnels, or webhooks (dorm rule).
-  After the one-time model download, Phase 1 makes no internet requests.
+  After the one-time model download, Phase 1 makes no internet requests. Outlook
+  sign-in uses the device code flow for the same reason: no redirect, no local server.
 - **Personal data only encrypted, and as little as possible.** Audio is kept in
   memory and discarded after transcription; transcripts are never written. The only
   personal data on disk is names and voiceprints, AES-256-GCM encrypted with a key
@@ -49,16 +52,19 @@ config.yaml          common settings + per-device profiles (laptop, jetson, ...)
 core/                config & profile detection, hardware probe, metrics, network
                      guard, turn orchestration, voice loop, identity (who's speaking),
                      people (onboarding + people commands), barge-in, feedback
-                     ("that was wrong"), dialog helpers, lifecycle (shutdown, mute, stop)
+                     ("that was wrong"), dialog helpers, lifecycle (shutdown, mute, stop),
+                     outlook (mail and calendar commands), when (spoken dates and times)
 audio/               mic, wake word, VAD/endpointing, STT, speaker recognition,
                      TTS (Kokoro, Piper) + pipelined playback + chimes
 brain/               LLM backends + history, persona prompt, speech text cleanup,
                      language modes (profanity), capability guard (honest "can't yet")
 storage/             encrypted JSON files (AES-GCM), user store, training notes
 security/            data key in the system keyring, wipe passphrase (Argon2id), nuclear wipe
-tools/               placeholder for Phase 2+
+tools/               fixed, validated tools: outlook.py (MSAL sign-in, encrypted token cache,
+                     read-only Microsoft Graph client)
 scripts/             download_models.py (hash-pinned), bench.py (latency), voice_eval.py
-                     (speaker recognition + endpointing on LibriSpeech), wakeword_test.py
+                     (speaker recognition + endpointing on LibriSpeech), wakeword_test.py,
+                     outlook_eval.py (email summaries: speed, injection resistance)
 notebooks/           train_hey_orion.ipynb: Colab training for the custom wake word
 tests/               pytest suite (no models or audio hardware needed)
 docs/                user-manual.md, wake-word.md, benchmarks.md (measured results)
@@ -203,6 +209,29 @@ Thresholds were calibrated on real embeddings, not guessed (`core/memory.py`,
   admits not knowing. Pages are read with trafilatura, answers name their source, queries are
   privacy-filtered, pages are untrusted data, and private network addresses are refused.
   Big questions offer a handoff to Claude with its own web search.
+
+## Outlook mail and calendar (Phase 3)
+
+- **Read-only by construction:** the app asks only for `Mail.Read` and `Calendars.Read`, and
+  the Graph client (`tools/outlook.py`) has a GET method and nothing else, so reading an email
+  doesn't even mark it read. A test fails if a write scope is ever added.
+- **Sign-in:** your own Entra app registration, then `python main.py outlook setup`: it checks the
+  client ID with Microsoft, picks the right tenant, saves both to the git-ignored
+  `config.local.yaml`, and signs in with the device code flow. MSAL's token cache is kept per
+  person in `data/outlook.enc`, AES-256-GCM. The wipe shreds it first; deleting a person
+  deletes theirs.
+- **Answers are built by code** (`core/outlook.py`): unread counts, senders, times, subjects,
+  and calendar events come straight from Graph, so they can't be invented. The local model only
+  writes a one- or two-sentence summary of a single email, given as untrusted data in
+  `<email>` tags with no tools.
+- **Private:** only the recognised person's own account; mail and events stay in memory for
+  ten minutes and are never written; the conversation log keeps a placeholder instead of the
+  reply; answered before the Claude router, so never sent to the cloud. The audit log records
+  each call's kind and item count, never content.
+- **Dates** (`core/when.py`): "tomorrow afternoon", "next Friday", "am I free at 3" are parsed
+  deterministically in the system time zone, daylight-saving aware.
+
+Setup and every phrase: [user manual, section 12e](docs/user-manual.md#12e-outlook-mail-and-calendar).
 
 ## Language
 
@@ -438,7 +467,8 @@ update its URL, blank its hash, run the script, then pin the printed hash.
   live voice testing)*
 - [x] Phase 2.5: Encryption at rest, shutdown and nuclear-wipe kill switches, mute
   ([spec](docs/specs/phase-2.5.md)) *(built; awaiting live voice testing)*
-- [ ] Phase 3: Outlook mail and calendar (Microsoft Graph, device code flow, read-only)
+- [x] Phase 3: Outlook mail and calendar (Microsoft Graph, device code flow, read-only)
+  ([spec](docs/specs/phase-3.md)) *(built; awaiting live testing with a real account)*
 - [ ] Phase 4: Alarms and morning briefing
 - [ ] Phase 5: Local meeting notes
 - [x] Phase 6: Custom "hey orion" wake word *(trained with the Colab notebook, in use; tune with

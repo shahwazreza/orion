@@ -29,6 +29,7 @@ details (architecture, tests, benchmarks), see the [README](../README.md).
 12b. [Claude mode](#12b-claude-mode)
 12c. [Web search](#12c-web-search)
 12d. [Kill switches and mute](#12d-kill-switches-and-mute)
+12e. [Outlook mail and calendar](#12e-outlook-mail-and-calendar)
 13. [Terminal command reference](#13-terminal-command-reference)
 14. [Settings reference](#14-settings-reference)
 15. [Your privacy: what's stored and where](#15-your-privacy-whats-stored-and-where)
@@ -57,6 +58,8 @@ details (architecture, tests, benchmarks), see the [README](../README.md).
 - **Standing instructions:** "whenever I say I'm leaving, remind me to take my keys".
 - **Look things up on the web** when he doesn't know, and say where the answer came from.
 - **Ask Claude** for you, only when you say so, with nothing personal sent unless you allow it.
+- **Check your Outlook email and calendar**, read-only: new emails, who they're from, a short
+  summary or the full text, what's on today, and whether you're free (section 12e).
 - Run in text mode, where you type instead of talk.
 - **Shut down on command** ("Orion, shut down"), **mute** ("stop listening"), and erase
   everything with your secret **wipe passphrase** (section 12d).
@@ -65,14 +68,13 @@ details (architecture, tests, benchmarks), see the [README](../README.md).
 
 | Not yet | Coming in |
 |---|---|
-| Read your email or calendar | Phase 3 |
 | Alarms, morning briefing | Phase 4 |
 | Meeting notes | Phase 5 |
 | Build software for you | Phase 7 |
 
 Ask him about any of these and he tells you he can't do it yet. For live or personal
-information (weather, your email or calendar, the news, prices, scores, alarms and
-reminders) that answer is built in: *"I can't check the weather yet. That's coming
+information (weather, the news, prices, scores, alarms and reminders, and email or
+calendar requests beyond what section 12e lists) that answer is built in: *"I can't check the weather yet. That's coming
 with the morning briefing, and I won't guess."* The model never gets the chance to
 make something up. Ordinary questions about those topics ("how does weather form?",
 "how do I write a professional email?") are still answered normally.
@@ -694,7 +696,7 @@ doubles, up to a day. If Orion is running, it's stopped first.
 
 **What's erased, in this order:**
 
-1. Sign-outs and token caches of online accounts (Outlook, from Phase 3).
+1. Outlook sign-ins: the token file is overwritten and deleted (section 12e).
 2. The encryption key in your keyring. This is the step that really protects you:
    every encrypted Orion file becomes unreadable at that instant, including any
    copy of it anywhere.
@@ -718,6 +720,101 @@ key (`secrets set anthropic`). Claude's and the search engines' own servers keep
 whatever they normally keep; the wipe can only erase what's on this computer.
 
 ---
+
+## 12e. Outlook mail and calendar
+
+Orion can read your Outlook email and calendar. He can't send, reply, delete, move,
+accept invitations, or even mark an email as read: he only has read permission.
+
+### Setting it up (once, about 10 minutes)
+
+Orion signs in with an app registration of your own, so no one else's app ever sees
+your mail. It's free. Registering the app happens on Microsoft's website (steps 1 to 5);
+then one command does the rest (step 6).
+
+1. Open the Microsoft Entra admin center, <https://entra.microsoft.com>, and sign in
+   with the Microsoft account you'll connect. Go to **App registrations**, then
+   **New registration**. If Microsoft says your account has no directory, create a
+   free Azure account first; it comes with one.
+2. Name it `Orion`. Under **Supported account types**, choose *Accounts in any
+   organizational directory and personal Microsoft accounts*. Leave **Redirect URI**
+   empty. Click **Register**.
+3. Copy the **Application (client) ID** from the overview page. It isn't a secret.
+4. Under **Authentication**, set **Allow public client flows** to **Yes** and save.
+   This allows the sign-in with a code that Orion uses.
+5. Under **API permissions**, choose **Add a permission**, **Microsoft Graph**,
+   **Delegated permissions**, then tick **Mail.Read** and **Calendars.Read**. Add
+   nothing else.
+6. Run the setup and paste the ID when it asks:
+
+   ```bash
+   python main.py outlook setup            # the owner; or: outlook setup Sam
+   ```
+
+   It checks the app with Microsoft and works out which accounts it accepts. It saves
+   the ID in `config.local.yaml`, creating the file if needed. That file holds this
+   computer's own settings and is never committed to git. Then it prints a link and a
+   short code: open the link on any browser, enter the code, sign in, and accept the
+   two permissions. It finishes by checking a few read-only requests.
+
+If the app registration has a mistake, setup says what to fix and saves nothing, so
+you can fix it on Microsoft's site and run it again. Run it again later to change the
+ID or sign in again.
+
+Signing in happens in the terminal, never by voice, so the code is never read out
+loud. Orion opens no port for it. Each person Orion knows can connect their own
+account with `python main.py outlook setup NAME`. They reuse your app, so they only
+press Enter at the ID prompt and sign in.
+
+**Work or school accounts:** many universities and employers block apps that their
+IT department hasn't approved. If Microsoft says *Need admin approval*, use a personal
+account or ask your IT department.
+
+### What to say
+
+| Say | What happens |
+|---|---|
+| "Any new emails?" / "Check my email" | How many are unread, and who the newest three are from and what about |
+| "Read my latest email" | Who it's from, when, and the subject, then a one- or two-sentence summary |
+| "Read the second one" / "Next one" / "Read it" | Another email from the list he just gave you |
+| "Read it out" / "Read the whole thing" | The email's own text, about 45 seconds at a time. He asks before reading on |
+| "Any emails from Alex?" / "Did Alex email me?" | The latest few from that person |
+| "What's on my calendar today?" / "My schedule tomorrow" | Your events, with times and places. Today means what's left of it |
+| "What have I got on Friday?" / "This week" / "Next week" / "This weekend" | Events in that stretch, by day |
+| "What's on tomorrow afternoon?" | Morning is 6 to 12, afternoon 12 to 5, evening 5 to 10 |
+| "When's my next meeting?" | The next event, or the one you're in now |
+| "Am I free at 3 tomorrow?" / "Am I busy Friday afternoon?" | Checked against your busy times. Tentative counts as busy, "free" doesn't |
+| "Disconnect my Outlook" | Forgets your sign-in on this computer, after asking |
+
+A bare hour like "at 3" means 3 PM; 8 to 11 mean the morning. "Next Friday" is the
+Friday of next week, and he says the date so you can tell. Times are in this
+computer's time zone.
+
+### What's private
+
+- **Only you hear your mail.** Orion reads only the account of the person he
+  recognises. People he doesn't recognise get nothing, and he never mentions anyone
+  else's account. Set `outlook.strict_voice: true` to need a clear voice match for
+  every Outlook request, as for deleting things.
+- **Your mail stays on this computer.** It's fetched when you ask, kept in memory for
+  ten minutes for follow-ups, and never written to disk. Your conversation history
+  keeps your question and "(answered from Outlook)", not what he read out
+  (`outlook.save_replies: true` keeps that too, encrypted).
+- **Never to Claude, never to a search.** Email and calendar requests are answered
+  locally even in Claude mode. Summaries come from the local model.
+- **Emails are only information.** An email that says "ignore your instructions" or
+  "remember that..." can't make Orion do anything. Only your own words are commands.
+- **The sign-in** is kept encrypted in `data/outlook.enc`. The nuclear wipe deletes it
+  first. Deleting a person deletes theirs.
+- **Revoking it at Microsoft too:** disconnecting forgets the sign-in on this
+  computer. To cancel it at Microsoft, remove Orion at
+  <https://account.live.com/consent/Manage> (personal accounts) or
+  <https://myapps.microsoft.com> (work or school).
+- The audit log records each Outlook request: what kind and how many items. It never
+  records senders, subjects, text, or event names.
+
+If the internet is down, the sign-in has expired, or Outlook is busy, he says which.
+He never guesses an email or an event.
 
 ## 13. Terminal command reference
 
@@ -767,6 +864,16 @@ Run these from `~/orion` with the environment active.
 | `python main.py killswitch status` | Whether a passphrase is set, or locked after wrong tries |
 | `python main.py wipe` | Nuclear wipe: passphrase (hidden), then type "confirm wipe" |
 
+### Outlook
+
+| Command | Purpose |
+|---|---|
+| `python main.py outlook setup [NAME]` | Guided setup: asks for the client ID, checks it with Microsoft, saves it to `config.local.yaml`, signs in, and tests |
+| `python main.py outlook status` | Who is connected, and as which Microsoft account |
+| `python main.py outlook connect [NAME]` | Sign in with a code (the owner if no name is given) |
+| `python main.py outlook test [NAME]` | Check the sign-in and time a few read-only requests. Shows counts only |
+| `python main.py outlook disconnect NAME` | Forget that person's sign-in on this computer |
+
 ### Training notes
 
 | Command | Purpose |
@@ -788,6 +895,8 @@ Run these from `~/orion` with the environment active.
 ## 14. Settings reference
 
 All settings live in `config.yaml`. Settings under `common:` apply everywhere.
+Settings for this computer only go in `config.local.yaml` next to it, in the same
+shape as `common:`. That file is never committed to git and wins over `config.yaml`.
 The `laptop` and `jetson` profiles override only what differs for that device,
 and the right one is picked automatically. Restart Orion after changing anything.
 
@@ -876,6 +985,11 @@ See section 11: `tts.backend`, `tts.kokoro.*`, `tts.piper.*`.
 | `search.enabled` | `true` | `false` = offline mode |
 | `search.backend` | `searxng` | `searxng` (local) or `brave` |
 | `search.max_rounds` | `3` | Search rounds per question |
+| `outlook.enabled` | `true` | Outlook mail and calendar |
+| `outlook.client_id` | `null` | Your app registration's ID (section 12e). Set it in `config.local.yaml` |
+| `outlook.tenant` | `common` | `common` (personal and work/school), `consumers`, `organizations`, or a tenant ID |
+| `outlook.strict_voice` | `false` | Need a clear voice match for every Outlook request |
+| `outlook.save_replies` | `false` | Keep what he read out in the conversation history (encrypted) |
 | `backups.keep` | `30` | Daily encrypted database backups kept |
 
 ### Data and logs
@@ -893,8 +1007,9 @@ See section 11: `tts.backend`, `tts.kokoro.*`, `tts.piper.*`.
 ## 15. Your privacy: what's stored and where
 
 **Nothing personal leaves your computer.** Orion goes online only to search the web
-(generic queries, no personal details) and when you ask for Claude (nothing personal
-unless you say "include..."). Both are logged in the encrypted audit log. He also opens no network ports, and refuses to
+(generic queries, no personal details), when you ask for Claude (nothing personal
+unless you say "include..."), and to fetch your own Outlook mail and calendar from
+Microsoft when you ask. All three are logged in the encrypted audit log. He also opens no network ports, and refuses to
 start if Ollama is reachable from the network.
 
 | What | Stored? | Where |
@@ -907,6 +1022,8 @@ start if Ollama is reachable from the network.
 | Daily backups | Yes, **encrypted**, last 30 | `data/backups/` |
 | Training notes (if on) | Yes, **encrypted**, no conversation text | `data/training_notes.enc` |
 | Your wipe passphrase | **Never.** Only a salted Argon2id hash, **encrypted** | `data/killswitch.enc` |
+| Your emails and calendar events | **Never.** Fetched when you ask, kept in memory for 10 minutes | none |
+| Outlook sign-ins (tokens) | Yes, **encrypted** (AES-256), per person | `data/outlook.enc` |
 | The encryption key | In KDE Wallet, never on disk or in git | your system keyring |
 | Speed and memory metrics | Yes, **encrypted**, numbers only | `logs/metrics.enc` |
 
@@ -997,6 +1114,29 @@ look like an Anthropic key, the clipboard held something else.
 Say "that was wrong" straight after a wrong reminder, or "also remind me when I say ..."
 to add your phrasing.
 
+**Microsoft's Entra site says your account "does not exist in tenant 'Microsoft
+Services'"** (AADSTS16000). Your personal Microsoft account has no directory of its
+own, so it can't register apps yet. Complete a free Azure account signup with that
+account (https://azure.microsoft.com/free), or Azure for Students with your school
+account, then sign in to the Entra site again. Nothing is charged for what Orion needs.
+
+**Outlook sign-in fails.** `outlook setup` checks the app first and says what to fix.
+`outlook connect` prints Microsoft's reason after the sentence. The common ones:
+
+- *AADSTS7000218* (needs a client secret): **Allow public client flows** is still off in
+  the app registration's **Authentication** page.
+- *AADSTS700016* or *AADSTS50020* (app not found, or account not allowed): the client ID
+  is wrong, or the app's **Supported account types** doesn't include your kind of
+  account. Choose the option with personal accounts, then run `outlook setup` again.
+- *AADSTS9002346* (personal accounts only): run `outlook setup`; it sets
+  `outlook.tenant: consumers` for you.
+- *Need admin approval*: your school or employer blocks unapproved apps. Use a personal
+  account or ask IT.
+
+**"Your Outlook sign-in has expired."** Microsoft ended the sign-in, for example after a
+password change or about 90 days unused. Run `python main.py outlook setup` again and
+answer yes to signing in again.
+
 **He made something up.**
 The 3B model sometimes does. Say "that was wrong" (with training notes on) so it
 gets noted. Later phases add real data sources and fine-tuning.
@@ -1027,6 +1167,16 @@ gets noted. Later phases add real data sources and fine-tuning.
   and occasionally swore on a clean question. Phase 10 fine-tuning targets this.
 - **"Keep it clean" doesn't survive a restart.** Use `profanity: "off"` or `--demo`
   if you need it guaranteed.
-- **Voice recognition can be fooled** by a recording. It's for convenience only.
+- **Voice recognition can be fooled** by a recording. It's for convenience only. That
+  matters more now that he reads email: turn on `outlook.strict_voice` if others live
+  with you.
+- **Outlook hasn't been tested with a real account yet.** It was built and tested
+  against a simulated Microsoft service. Expect rough edges until it's been used live.
+- **Email summaries come from the 3B model** and can miss or blur details. Sender,
+  time, and subject are always exact; say "read it out" for the email's own words.
+- **Outlook is a snapshot, not a feed.** Orion doesn't announce new mail; he checks
+  when you ask. Only the inbox and your main calendar are read, and only recent items.
+- **Long read-outs can't be interrupted by voice**, but they come in short parts, and
+  "no" stops them.
 - **The Jetson setup isn't validated yet.** It's planned, and the settings
   exist, but it hasn't run on the board.
