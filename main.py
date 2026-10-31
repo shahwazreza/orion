@@ -9,7 +9,7 @@
     python main.py notes [list | clear]
     python main.py secrets [set anthropic | status]
     python main.py audit [N]
-    python main.py outlook [status | connect [NAME] | disconnect NAME | test [NAME]]
+    python main.py outlook [setup [NAME] | status | connect [NAME] | disconnect NAME | test [NAME]]
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="optional: stop, wipe, killswitch [status | set | test], "
                         "users [list | rename OLD NEW | delete NAME | relearn NAME], notes [list | clear], "
                         "secrets [status | set ...], audit [N], metrics [N], "
-                        "outlook [status | connect [NAME] | disconnect NAME | test [NAME]]")
+                        "outlook [setup [NAME] | status | connect [NAME] | disconnect NAME | test [NAME]]")
     return p.parse_args(argv)
 
 
@@ -653,14 +653,14 @@ def make_outlook_commands(cfg, assistant, store, audit):
     auth = open_outlook_auth(cfg)
     graph = GraphClient(auth, audit=audit, timeout_s=o.get("timeout_s", 15)) if auth is not None else None
     if auth is None:
-        log.info("Outlook: not set up (outlook.client_id is empty; see the user manual, section Outlook)")
+        log.info("Outlook: not set up (python main.py outlook setup)")
     else:
         known = {u.id for u in store.all()}
         for uid in [uid for uid in auth.vault.connected() if uid not in known]:
             auth.disconnect(uid)             # that person was deleted: their sign-in goes too
         names = [u.name for u in store.all() if auth.is_connected(u.id)]
         log.info("Outlook: %s", f"connected for {', '.join(names)}" if names
-                 else "set up, nobody connected yet (python main.py outlook connect)")
+                 else "set up, nobody connected yet (python main.py outlook setup)")
     outlook = Outlook(auth, graph, configured=auth is not None, strict_voice=bool(o.get("strict_voice", False)),
                       save_replies=bool(o.get("save_replies", False)))
 
@@ -685,9 +685,7 @@ def make_outlook_commands(cfg, assistant, store, audit):
 
 
 def outlook_cli(cfg, args: list[str]) -> int:
-    """Connect, check, or disconnect Outlook accounts. Never prints tokens or mail content."""
-    import time as _time
-
+    """Set up, connect, check, or disconnect Outlook accounts. Never prints tokens or mail content."""
     from tools.outlook import GraphClient, OutlookError
 
     o = cfg.section("outlook")
@@ -695,10 +693,10 @@ def outlook_cli(cfg, args: list[str]) -> int:
     if not o.get("enabled", True):
         print("Outlook is switched off (outlook.enabled: false in config.yaml).")
         return 1
+    if action == "setup" and len(args) <= 2:
+        return outlook_setup(cfg, args[1] if len(args) == 2 else None)
     if not (o.get("client_id") or "").strip():
-        print("Outlook isn't set up: outlook.client_id in config.yaml is empty.\n"
-              "Register an app (free) and paste its Application (client) ID there. Steps: user manual,\n"
-              "section 'Outlook mail and calendar'.")
+        print("Outlook isn't set up yet. Run: python main.py outlook setup")
         return 1
     store = open_user_store(cfg)
     auth = open_outlook_auth(cfg)
@@ -727,7 +725,7 @@ def outlook_cli(cfg, args: list[str]) -> int:
             return 1
         print(f"Connecting Outlook for {u.name} (read-only: mail and calendar).")
         try:
-            username = auth.connect(u.id, show=print)
+            username = auth.connect(u.id, show=lambda s: print(s, flush=True))
         except OutlookError as exc:
             print(f"{exc.spoken} {exc}" if str(exc) != exc.spoken else exc.spoken)
             return 1
@@ -748,31 +746,130 @@ def outlook_cli(cfg, args: list[str]) -> int:
               "(work or school).")
         return 0
     if action == "test" and len(args) <= 2:
-        from core.when import local_now
-        from datetime import timedelta
-
         u = person(args[1] if len(args) == 2 else None)
         if u is None:
             return 1
-        graph = GraphClient(auth, audit=open_audit(cfg), timeout_s=o.get("timeout_s", 15))
-        now = local_now()
-        checks = [("token", lambda: auth.token(u.id) and "ok"),
-                  ("unread count", lambda: graph.unread_count(u.id)),
-                  ("latest 5 emails", lambda: len(graph.latest(u.id, top=5))),
-                  ("events in the next 24 h", lambda: len(graph.events(u.id, now, now + timedelta(days=1))))]
-        failed = False
-        for label, check in checks:
-            t = _time.perf_counter()
-            try:
-                result = check()
-                print(f"  {label:<24} {result!s:<6} {(_time.perf_counter() - t) * 1000:7.0f} ms")
-            except OutlookError as exc:
-                print(f"  {label:<24} FAILED: {exc.spoken}")
-                failed = True
-                break
-        return 1 if failed else 0
-    print("Usage: python main.py outlook [status | connect [NAME] | disconnect NAME | test [NAME]]")
+        return outlook_checks(auth, GraphClient(auth, audit=open_audit(cfg), timeout_s=o.get("timeout_s", 15)), u)
+    print("Usage: python main.py outlook [setup [NAME] | status | connect [NAME] | disconnect NAME | test [NAME]]")
     return 2
+
+
+def outlook_checks(auth, graph, user) -> int:
+    """Time a few read-only requests for ``user``. Prints counts only, never content."""
+    import time as _time
+    from datetime import timedelta
+
+    from core.when import local_now
+    from tools.outlook import OutlookError
+
+    now = local_now()
+    checks = [("token", lambda: auth.token(user.id) and "ok"),
+              ("unread count", lambda: graph.unread_count(user.id)),
+              ("latest 5 emails", lambda: len(graph.latest(user.id, top=5))),
+              ("events in the next 24 h", lambda: len(graph.events(user.id, now, now + timedelta(days=1))))]
+    for label, check in checks:
+        t = _time.perf_counter()
+        try:
+            result = check()
+        except OutlookError as exc:
+            print(f"  {label:<24} FAILED: {exc.spoken}")
+            return 1
+        print(f"  {label:<24} {result!s:<6} {(_time.perf_counter() - t) * 1000:7.0f} ms")
+    return 0
+
+
+SETUP_STEPS = """\
+Outlook setup (read-only mail and calendar).
+
+You need an app registration of your own first (free, about 5 minutes, once per computer):
+  1. https://entra.microsoft.com > App registrations > New registration. Name it Orion.
+     Account types: the option that includes personal Microsoft accounts. No redirect URI.
+  2. Authentication: 'Allow public client flows' = Yes. Save.
+  3. API permissions > Add > Microsoft Graph > Delegated: Mail.Read and Calendars.Read.
+  4. Copy the Application (client) ID from the Overview page.
+If Microsoft says your account has no directory, see the user manual, section 12e.
+"""
+
+
+def outlook_setup(cfg, name: str | None = None, read=input, msal_module=None, show=print) -> int:
+    """Guided setup: client ID, the right tenant (asked of Microsoft), config.local.yaml, sign-in, test."""
+    from core.config import save_local_settings
+    from security.keystore import KeyStoreError, get_data_key
+    from storage.encrypted_file import DecryptionError
+    from tools.outlook import CLIENT_ID, GraphClient, OutlookAuth, OutlookError, open_vault, probe_tenant
+
+    o = cfg.section("outlook")
+    store = open_user_store(cfg)
+    if not store.persistent:
+        show("The system keyring isn't available, so a sign-in couldn't be stored safely. "
+             "Unlock KDE Wallet and try again.")
+        return 1
+    user = store.find(name) if name else store.owner()
+    if user is None:
+        show(f"No user called {name!r}. See: python main.py users list" if name
+             else "Orion hasn't met its owner yet. Start Orion once (python main.py), then run this again.")
+        return 1
+
+    current = (o.get("client_id") or "").strip()
+    show(SETUP_STEPS)
+    tenant = None
+    for _ in range(3):
+        prompt = (f"Application (client) ID [Enter keeps {current}]: " if current
+                  else "Paste the Application (client) ID: ")
+        try:
+            entered = read(prompt).strip().strip("'\"")
+        except EOFError:
+            return 1
+        client_id = entered or current
+        if not CLIENT_ID.match(client_id):
+            show("That doesn't look like a client ID: it should be like 1a2b3c4d-1111-2222-3333-444455556666.")
+            continue
+        show("Checking the app with Microsoft...")
+        tenant, problem = probe_tenant(client_id, msal_module)
+        if tenant:
+            break
+        show(problem)
+        current = ""
+    if not tenant:
+        show("Nothing was saved. Fix the app registration, then run: python main.py outlook setup")
+        return 1
+
+    path = save_local_settings({"outlook": {"client_id": client_id, "tenant": tenant}}, cfg.root)
+    kind = "personal Microsoft accounts" if tenant == "consumers" else "personal and work or school accounts"
+    show(f"The app works with {kind}. Saved to {path.name} (this computer only, never committed).")
+
+    try:
+        vault = open_vault(cfg.path("paths.data"), get_data_key())
+    except (KeyStoreError, DecryptionError) as exc:
+        show(f"{exc}. The settings are saved, but sign-in needs the keyring.")
+        return 1
+    auth = OutlookAuth(client_id, tenant, vault, msal_module=msal_module)
+    username = vault.connected().get(user.id)
+    if username and current == client_id:
+        answer = read(f"{user.name} is already connected as {username}. Sign in again? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            show("Kept the existing sign-in.")
+            return outlook_checks(auth, GraphClient(auth, audit=open_audit(cfg), timeout_s=o.get("timeout_s", 15)),
+                                  user)
+    show(f"\nSigning in {user.name}. Open the link below on any browser, enter the code, and sign in with "
+         "the Microsoft account whose mail Orion should read.")
+    try:
+        # Flushed at once: the code must appear even when output goes to a pipe or file.
+        username = auth.connect(user.id, show=(lambda s: print(s, flush=True)) if show is print else show)
+    except OutlookError as exc:
+        show(f"{exc.spoken} {exc}" if str(exc) != exc.spoken else exc.spoken)
+        return 1
+    except Exception as exc:
+        show(f"Couldn't sign in: {exc}")
+        return 1
+    show(f"Connected {user.name} as {username or 'your Microsoft account'}. Checking it works:")
+    result = outlook_checks(auth, GraphClient(auth, audit=open_audit(cfg), timeout_s=o.get("timeout_s", 15)), user)
+    if result == 0:
+        others = [u.name for u in store.all() if u.id != user.id and u.id not in vault.connected()]
+        show("\nDone. Restart Orion if it's running, then ask: \"any new emails?\"" +
+             (f"\nOthers can connect their own accounts with: python main.py outlook setup NAME "
+              f"(e.g. {others[0]}). The app is reused." if others else ""))
+    return result
 
 
 def open_audit(cfg):

@@ -729,7 +729,8 @@ accept invitations, or even mark an email as read: he only has read permission.
 ### Setting it up (once, about 10 minutes)
 
 Orion signs in with an app registration of your own, so no one else's app ever sees
-your mail. It's free.
+your mail. It's free. Registering the app happens on Microsoft's website (steps 1 to 5);
+then one command does the rest (step 6).
 
 1. Open the Microsoft Entra admin center, <https://entra.microsoft.com>, and sign in
    with the Microsoft account you'll connect. Go to **App registrations**, then
@@ -744,24 +745,26 @@ your mail. It's free.
 5. Under **API permissions**, choose **Add a permission**, **Microsoft Graph**,
    **Delegated permissions**, then tick **Mail.Read** and **Calendars.Read**. Add
    nothing else.
-6. Put the ID in `config.yaml`:
-
-   ```yaml
-   outlook:
-     client_id: 11111111-2222-3333-4444-555555555555
-   ```
-
-7. Connect your account. Orion prints a link and a short code. Open the link on any
-   browser, enter the code, sign in, and accept the two permissions.
+6. Run the setup and paste the ID when it asks:
 
    ```bash
-   python main.py outlook connect          # the owner; or: outlook connect Sam
-   python main.py outlook test             # checks the sign-in and times a few requests
+   python main.py outlook setup            # the owner; or: outlook setup Sam
    ```
+
+   It checks the app with Microsoft and works out which accounts it accepts. It saves
+   the ID in `config.local.yaml`, creating the file if needed. That file holds this
+   computer's own settings and is never committed to git. Then it prints a link and a
+   short code: open the link on any browser, enter the code, sign in, and accept the
+   two permissions. It finishes by checking a few read-only requests.
+
+If the app registration has a mistake, setup says what to fix and saves nothing, so
+you can fix it on Microsoft's site and run it again. Run it again later to change the
+ID or sign in again.
 
 Signing in happens in the terminal, never by voice, so the code is never read out
 loud. Orion opens no port for it. Each person Orion knows can connect their own
-account the same way.
+account with `python main.py outlook setup NAME`. They reuse your app, so they only
+press Enter at the ID prompt and sign in.
 
 **Work or school accounts:** many universities and employers block apps that their
 IT department hasn't approved. If Microsoft says *Need admin approval*, use a personal
@@ -865,6 +868,7 @@ Run these from `~/orion` with the environment active.
 
 | Command | Purpose |
 |---|---|
+| `python main.py outlook setup [NAME]` | Guided setup: asks for the client ID, checks it with Microsoft, saves it to `config.local.yaml`, signs in, and tests |
 | `python main.py outlook status` | Who is connected, and as which Microsoft account |
 | `python main.py outlook connect [NAME]` | Sign in with a code (the owner if no name is given) |
 | `python main.py outlook test [NAME]` | Check the sign-in and time a few read-only requests. Shows counts only |
@@ -891,6 +895,8 @@ Run these from `~/orion` with the environment active.
 ## 14. Settings reference
 
 All settings live in `config.yaml`. Settings under `common:` apply everywhere.
+Settings for this computer only go in `config.local.yaml` next to it, in the same
+shape as `common:`. That file is never committed to git and wins over `config.yaml`.
 The `laptop` and `jetson` profiles override only what differs for that device,
 and the right one is picked automatically. Restart Orion after changing anything.
 
@@ -980,7 +986,7 @@ See section 11: `tts.backend`, `tts.kokoro.*`, `tts.piper.*`.
 | `search.backend` | `searxng` | `searxng` (local) or `brave` |
 | `search.max_rounds` | `3` | Search rounds per question |
 | `outlook.enabled` | `true` | Outlook mail and calendar |
-| `outlook.client_id` | `null` | Your app registration's ID (section 12e) |
+| `outlook.client_id` | `null` | Your app registration's ID (section 12e). Set it in `config.local.yaml` |
 | `outlook.tenant` | `common` | `common` (personal and work/school), `consumers`, `organizations`, or a tenant ID |
 | `outlook.strict_voice` | `false` | Need a clear voice match for every Outlook request |
 | `outlook.save_replies` | `false` | Keep what he read out in the conversation history (encrypted) |
@@ -1108,19 +1114,28 @@ look like an Anthropic key, the clipboard held something else.
 Say "that was wrong" straight after a wrong reminder, or "also remind me when I say ..."
 to add your phrasing.
 
-**Outlook sign-in fails.** `outlook connect` prints Microsoft's reason after the
-sentence. The common ones:
+**Microsoft's Entra site says your account "does not exist in tenant 'Microsoft
+Services'"** (AADSTS16000). Your personal Microsoft account has no directory of its
+own, so it can't register apps yet. Complete a free Azure account signup with that
+account (https://azure.microsoft.com/free), or Azure for Students with your school
+account, then sign in to the Entra site again. Nothing is charged for what Orion needs.
+
+**Outlook sign-in fails.** `outlook setup` checks the app first and says what to fix.
+`outlook connect` prints Microsoft's reason after the sentence. The common ones:
 
 - *AADSTS7000218* (needs a client secret): **Allow public client flows** is still off in
   the app registration's **Authentication** page.
 - *AADSTS700016* or *AADSTS50020* (app not found, or account not allowed): the client ID
   is wrong, or the app's **Supported account types** doesn't include your kind of
-  account. Choose the option with personal accounts, or set `outlook.tenant` to match.
+  account. Choose the option with personal accounts, then run `outlook setup` again.
+- *AADSTS9002346* (personal accounts only): run `outlook setup`; it sets
+  `outlook.tenant: consumers` for you.
 - *Need admin approval*: your school or employer blocks unapproved apps. Use a personal
   account or ask IT.
 
 **"Your Outlook sign-in has expired."** Microsoft ended the sign-in, for example after a
-password change or about 90 days unused. Run `python main.py outlook connect` again.
+password change or about 90 days unused. Run `python main.py outlook setup` again and
+answer yes to signing in again.
 
 **He made something up.**
 The 3B model sometimes does. Say "that was wrong" (with training notes on) so it

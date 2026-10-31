@@ -175,5 +175,15 @@ assistant get a fixed warning instead of a summary. The subtler case reads like 
 email from a friend, so repeating its content is arguably right; it still can't
 trigger anything.
 
-**Microsoft Graph latency:** not measured yet; it needs a connected account.
-`python main.py outlook test` prints the time of each read-only request once one is.
+**Microsoft Graph latency** (`python main.py outlook test`, personal outlook.com account,
+dorm Wi-Fi, three runs; the first includes MSAL contacting Microsoft):
+
+| Request | Time |
+|---|---|
+| Token from the encrypted cache | 190 to 230 ms |
+| Unread count | 440 to 520 ms |
+| Latest 5 emails | 275 to 1020 ms (1020 on the first run) |
+| Events in the next 24 hours | 290 to 340 ms |
+
+"Any new emails?" makes the count and list calls, so expect about 1 s before Orion
+starts speaking.

@@ -16,8 +16,12 @@ for live testing.
   Orion never borrows another app's client ID.
 - `outlook.tenant: common` accepts personal (outlook.com) and work or school
   accounts. `consumers`, `organizations`, or a tenant ID narrow it.
-- Sign-in uses the **device code flow** from the terminal:
-  `python main.py outlook connect [NAME]`. Orion prints a Microsoft URL and a short
+- `python main.py outlook setup [NAME]` walks through it: asks for the client ID,
+  checks it with Microsoft (and picks `common` or `consumers` from the reply), saves
+  it to the git-ignored `config.local.yaml` (created if missing), signs in, and tests.
+  A broken app registration is explained and nothing is saved.
+- Sign-in uses the **device code flow** from the terminal
+  (`python main.py outlook connect [NAME]` on its own). Orion prints a Microsoft URL and a short
   code; you sign in on any browser. No redirect URI, no local web server, no open
   port (dorm rule). NAME defaults to the owner.
 - Saying "connect my Outlook" explains the terminal command. Sign-in never

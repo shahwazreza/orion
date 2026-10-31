@@ -339,7 +339,7 @@ def test_connecting_by_voice_points_to_the_terminal(auth):
     cmds = commands(auth)
     assert "already connected" in ask(cmds, "connect my Outlook")[1]
     handled, said = ask(cmds, "connect my outlook account", user=SAM)
-    assert handled and "python main.py outlook connect Sam" in said
+    assert handled and "python main.py outlook setup Sam" in said
 
 
 def test_disconnect_by_voice_asks_first(auth):
@@ -664,3 +664,126 @@ def test_outlook_answers_before_claude_mode(auth):
         loop.run("hey orion")
     assert any(s.startswith("You have 3 unread emails") for s in speaker.said)
     assert Router.decided == [] and assistant.heard == []
+
+
+# ---- guided setup ----------------------------------------------------------------------
+class AudienceMsal(FakeMsal):
+    """An app registered for personal accounts only: /common is refused, as Microsoft does."""
+
+    def __init__(self, refuse=None, **kw):
+        super().__init__(**kw)
+        self.refuse = refuse
+        base = self.PublicClientApplication
+        outer = self
+
+        class App(base):
+            def initiate_device_flow(self, scopes):
+                if outer.refuse:
+                    return {"error": "invalid", "error_description": f"{outer.refuse}: nope. Trace ID: 123"}
+                if self.authority.endswith("/common"):
+                    return {"error": "invalid_request", "error_description":
+                            "AADSTS9002346: Application is configured for use by Microsoft Account users only."}
+                return super().initiate_device_flow(scopes)
+
+        self.PublicClientApplication = App
+
+
+def test_probe_finds_the_personal_accounts_endpoint():
+    from tools.outlook import probe_tenant
+    assert probe_tenant("d734b894-9585-4f9c-9b50-568541346bb8", AudienceMsal()) == ("consumers", None)
+    assert probe_tenant("d734b894-9585-4f9c-9b50-568541346bb8", FakeMsal()) == ("common", None)
+
+
+@pytest.mark.parametrize("code,words", [("AADSTS700016", "Application (client) ID"),
+                                        ("AADSTS50059", "doesn't know that app"),
+                                        ("AADSTS7000218", "Allow public client flows"),
+                                        ("AADSTS99999", "Microsoft refused it: AADSTS99999: nope.")])
+def test_probe_explains_what_to_fix(code, words):
+    from tools.outlook import probe_tenant
+    tenant, problem = probe_tenant("d734b894-9585-4f9c-9b50-568541346bb8", AudienceMsal(refuse=code))
+    assert tenant is None and words in problem and "Trace ID" not in problem
+
+
+def test_local_settings_are_created_merged_and_private(tmp_path):
+    import stat
+
+    from core.config import save_local_settings
+    path = save_local_settings({"outlook": {"client_id": "a", "tenant": "consumers"}}, tmp_path)
+    assert path == tmp_path / "config.local.yaml"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    path.write_text("llm: {model: mine}\noutlook: {client_id: old, timeout_s: 30}\n")
+    save_local_settings({"outlook": {"client_id": "new", "tenant": "common"}}, tmp_path)
+    import yaml
+    assert yaml.safe_load(path.read_text()) == {"llm": {"model": "mine"},
+                                                "outlook": {"client_id": "new", "timeout_s": 30, "tenant": "common"}}
+
+
+@pytest.fixture
+def setup_env(tmp_path, monkeypatch):
+    """A config rooted in tmp_path, an encrypted user store with an owner, and no network."""
+    import main
+    import security.keystore
+    from storage.users import UserStore
+
+    (tmp_path / "config.yaml").write_text("default_profile: laptop\ncommon:\n  paths: {data: data, logs: logs}\n"
+                                          "  outlook: {enabled: true, client_id: null, tenant: common}\n"
+                                          "profiles:\n  laptop: {}\n")
+    store = UserStore(EncryptedJSONFile(tmp_path / "users.enc", KEY, "users"))
+    owner = store.add("Reza")
+    monkeypatch.setattr(main, "open_user_store", lambda cfg: store)
+    monkeypatch.setattr(main, "open_audit", lambda cfg: None)
+    monkeypatch.setattr(security.keystore, "get_data_key", lambda create=True: KEY)
+    checked = []
+    monkeypatch.setattr(main, "outlook_checks", lambda auth, graph, user: checked.append(user.name) or 0)
+    from core.config import load_config
+    from core.hardware import Probe
+    cfg = load_config(tmp_path / "config.yaml", probe=Probe(machine="x86_64", device_tree_model=""))
+    return main, cfg, owner, checked
+
+
+def test_setup_creates_the_local_file_signs_in_and_checks(setup_env, tmp_path):
+    main, cfg, owner, checked = setup_env
+    out, answers = [], iter(["  'd734b894-9585-4f9c-9b50-568541346bb8'  "])
+    assert main.outlook_setup(cfg, read=lambda p: next(answers), msal_module=AudienceMsal(), show=out.append) == 0
+    import yaml
+    local = yaml.safe_load((tmp_path / "config.local.yaml").read_text())
+    assert local == {"outlook": {"client_id": "d734b894-9585-4f9c-9b50-568541346bb8", "tenant": "consumers"}}
+    assert any("ABCD-EFGH" in line for line in out)          # the sign-in code is shown
+    assert TokenVault(vault_file(tmp_path / "data")).connected() == {owner.id: "reza@outlook.com"}
+    assert checked == ["Reza"]
+    assert "d734b894" not in (tmp_path / "config.yaml").read_text()     # the shared config is never touched
+
+
+def test_setup_retries_a_bad_id_and_saves_nothing_if_it_never_works(setup_env, tmp_path):
+    main, cfg, owner, checked = setup_env
+    out, answers = [], iter(["not-an-id", "11111111-2222-3333-4444-555555555555", "x"])
+    msal = AudienceMsal(refuse="AADSTS50059")
+    assert main.outlook_setup(cfg, read=lambda p: next(answers), msal_module=msal, show=out.append) == 1
+    assert any("doesn't look like a client ID" in line for line in out)
+    assert any("doesn't know that app" in line for line in out)
+    assert not (tmp_path / "config.local.yaml").exists() and checked == []
+
+
+def test_setup_keeps_an_existing_sign_in_unless_asked(setup_env, tmp_path):
+    main, cfg, owner, checked = setup_env
+    msal = AudienceMsal()
+    answers = iter(["d734b894-9585-4f9c-9b50-568541346bb8"])
+    main.outlook_setup(cfg, read=lambda p: next(answers), msal_module=msal, show=lambda s: None)
+    from core.config import load_config
+    from core.hardware import Probe
+    cfg = load_config(tmp_path / "config.yaml", probe=Probe(machine="x86_64", device_tree_model=""))
+    flows = len(msal.scopes_requested)
+    out, answers = [], iter(["", "n"])                   # Enter keeps the saved ID; don't sign in again
+    assert main.outlook_setup(cfg, read=lambda p: next(answers), msal_module=msal, show=out.append) == 0
+    assert "Kept the existing sign-in." in out
+    assert sum(1 for s in msal.scopes_requested[flows:]) == 1     # only the probe, no new sign-in
+
+
+def test_setup_needs_an_owner_first(setup_env, monkeypatch):
+    main, cfg, owner, checked = setup_env
+    from storage.users import UserStore
+    monkeypatch.setattr(main, "open_user_store", lambda cfg: UserStore(EncryptedJSONFile(
+        cfg.root / "empty.enc", KEY, "users")))
+    out = []
+    assert main.outlook_setup(cfg, read=lambda p: "", show=out.append) == 1
+    assert "hasn't met its owner" in out[0]

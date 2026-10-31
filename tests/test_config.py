@@ -87,3 +87,26 @@ def test_real_config_loads_for_every_profile():
         cfg = load_config(profile=name, probe=LAPTOP)
         assert cfg.get("llm.host").startswith("http://127.0.0.1")
         assert cfg.get("wakeword.models")
+
+
+def test_local_settings_file_wins_over_profiles_but_not_explicit_overrides(cfg_file, monkeypatch):
+    monkeypatch.delenv("ORION_PROFILE", raising=False)
+    (cfg_file.parent / "config.local.yaml").write_text(
+        "outlook: {client_id: abc-123, tenant: consumers}\nllm: {model: local-choice}\n")
+    cfg = load_config(cfg_file, probe=LAPTOP)
+    assert cfg.get("outlook.client_id") == "abc-123" and cfg.get("outlook.tenant") == "consumers"
+    assert cfg.get("llm.model") == "local-choice" and cfg.get("llm.num_ctx") == 2048
+    assert load_config(cfg_file, probe=LAPTOP, overrides={"llm": {"model": "cli"}}).get("llm.model") == "cli"
+
+
+def test_local_settings_file_must_be_a_mapping(cfg_file):
+    (cfg_file.parent / "config.local.yaml").write_text("- just a list\n")
+    with pytest.raises(ConfigError):
+        load_config(cfg_file, probe=LAPTOP)
+
+
+def test_local_settings_file_is_git_ignored():
+    from pathlib import Path
+
+    ignored = (Path(__file__).resolve().parent.parent / ".gitignore").read_text().splitlines()
+    assert "config.local.yaml" in ignored

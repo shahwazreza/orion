@@ -18,6 +18,7 @@ caller and never logged. The audit log gets the kind of call and a count only.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -117,6 +118,52 @@ class TokenVault:
             self.file.save({"version": 1, "accounts": self._data})
 
 
+CLIENT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+# Microsoft's error codes when starting a sign-in, and what to do about each.
+_SETUP_PROBLEMS = {
+    "AADSTS700016": "Microsoft doesn't know that app. Check you copied the Application (client) ID, "
+                    "not the Directory (tenant) ID or Object ID.",
+    "AADSTS50059": "Microsoft doesn't know that app. Check you copied the Application (client) ID, "
+                   "not the Directory (tenant) ID or Object ID.",
+    "AADSTS700038": "That isn't a valid Application (client) ID.",
+    "AADSTS7000218": "The app doesn't allow sign-in with a code yet. In the app's Authentication page, "
+                     "set 'Allow public client flows' to Yes and save.",
+    "AADSTS50020": "This kind of account isn't allowed by the app. In 'Supported account types', choose "
+                   "the option that includes personal Microsoft accounts.",
+}
+
+
+def probe_tenant(client_id: str, msal_module=None) -> tuple[str | None, str | None]:
+    """Which sign-in endpoint this app registration accepts: (tenant, None) or (None, problem).
+
+    Starts a device-code sign-in and abandons it at once (nothing is shown to anyone, and
+    the code expires unused). An app for personal accounts only is refused at /common
+    with AADSTS9002346, so /consumers is tried next.
+    """
+    if msal_module is None:
+        import msal as msal_module
+    for tenant in ("common", "consumers"):
+        try:
+            app = msal_module.PublicClientApplication(client_id, authority=f"{LOGIN}/{tenant}")
+            flow = app.initiate_device_flow(scopes=SCOPES)
+        except ValueError as exc:            # MSAL rejects some malformed IDs before asking Microsoft
+            return None, f"Microsoft refused that ID: {exc}"
+        except Exception as exc:              # offline
+            return None, f"I can't reach Microsoft ({type(exc).__name__}). Is the internet up?"
+        if "user_code" in flow:
+            return tenant, None
+        detail = flow.get("error_description", "") or flow.get("error", "")
+        if "AADSTS9002346" in detail and tenant == "common":
+            continue                          # personal accounts only: use /consumers
+        for code, problem in _SETUP_PROBLEMS.items():
+            if code in detail:
+                return None, problem
+        reason = detail.splitlines()[0].split(" Trace ID:")[0] if detail else "no reason given"
+        return None, f"Microsoft refused it: {reason}"
+    return None, "Microsoft refused it at both sign-in addresses."
+
+
 class OutlookAuth:
     """MSAL public client per person; access tokens refreshed silently from the cache."""
 
@@ -184,7 +231,7 @@ class OutlookAuth:
             cache.has_state_changed = False
         if not result or "access_token" not in result:
             raise OutlookError("Your Outlook sign-in has expired. Connect it again from the terminal "
-                               "with the outlook connect command.",
+                               "with the outlook setup command.",
                                (result or {}).get("error_description", "no cached account"))
         return result["access_token"]
 
@@ -255,7 +302,7 @@ class GraphClient:
             raise OutlookError("I can't reach Outlook right now. Is the internet up?", type(exc).__name__) from exc
         if r.status_code == 401:
             error = OutlookError("Outlook turned down my sign-in. Connect it again from the terminal "
-                                 "with the outlook connect command.")
+                                 "with the outlook setup command.")
         elif r.status_code == 403:
             error = OutlookError("Outlook says I don't have permission to read that.")
         elif r.status_code == 429:

@@ -333,19 +333,19 @@ class OutlookCommands:
         if user is None:
             return "I only read email and calendars for people I recognise."
         if not self.outlook.configured:
-            return ("Outlook isn't set up on this computer yet. It needs an app registration first; "
-                    "the user manual explains how.")
+            return ("Outlook isn't set up on this computer yet. Run python main.py outlook setup in the "
+                    "terminal; it walks you through it.")
         if not self.outlook.auth.is_connected(user.id):
             return (f"Outlook isn't connected for you yet, {user.name}. It can be connected from the "
-                    "terminal with the outlook connect command.")
+                    "terminal with the outlook setup command.")
         return None
 
     def _connect_help(self, user: User | None) -> str:
         if user is not None and self.outlook.connected(user):
             return f"Your Outlook is already connected, {user.name}."
-        return ("Signing in to Microsoft happens in the terminal, so the code isn't read out loud. Run "
-                "python main.py outlook connect" + (f" {user.name}" if user is not None and not user.is_owner else "")
-                + ", then follow the link it shows.")
+        return ("Setting up Outlook happens in the terminal, so the sign-in code isn't read out loud. Run "
+                "python main.py outlook setup" + (f" {user.name}" if user is not None and not user.is_owner else "")
+                + ", and it walks you through it.")
 
     def _disconnect(self, dialog: Dialog, user: User) -> bool:
         if not self.verified(dialog, user):

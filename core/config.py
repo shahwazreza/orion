@@ -1,6 +1,11 @@
 """Configuration loading with hardware profiles.
 
-Resolution order: ``common`` <- ``profiles.<name>`` <- explicit overrides.
+Resolution order: ``common`` <- ``profiles.<name>`` <- demo <- ``config.local.yaml``
+<- explicit overrides.
+
+``config.local.yaml`` sits next to ``config.yaml``, is git-ignored, and holds
+settings for this machine only (e.g. ``outlook.client_id``), in the same shape as
+``common``.
 The result is a plain nested dict wrapped in :class:`Config` for attribute-free,
 dotted-key access (``cfg.get("llm.model")``).
 """
@@ -19,6 +24,7 @@ from core import hardware
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+LOCAL_CONFIG_NAME = "config.local.yaml"
 
 
 class ConfigError(ValueError):
@@ -114,6 +120,37 @@ def load_config(
     merged = deep_merge(raw.get("common") or {}, body)
     if demo:
         merged = deep_merge(merged, raw.get("demo") or {})
+    local_path = cfg_path.resolve().parent / LOCAL_CONFIG_NAME
+    if local_path.exists():
+        with open(local_path, encoding="utf-8") as fh:
+            local = yaml.safe_load(fh) or {}
+        if not isinstance(local, Mapping):
+            raise ConfigError(f"{LOCAL_CONFIG_NAME} must hold settings like config.yaml's 'common' section")
+        merged = deep_merge(merged, local)
     if overrides:
         merged = deep_merge(merged, overrides)
     return Config(data=merged, profile=name, root=cfg_path.resolve().parent, demo=demo)
+
+
+def save_local_settings(updates: Mapping[str, Any], root: Path = PROJECT_ROOT) -> Path:
+    """Merge ``updates`` into ``config.local.yaml`` (git-ignored) and write it back, private to you.
+
+    Other settings already in the file are kept; YAML comments in it are not.
+    """
+    path = root / LOCAL_CONFIG_NAME
+    current: dict[str, Any] = {}
+    if path.exists():
+        with open(path, encoding="utf-8") as fh:
+            loaded = yaml.safe_load(fh) or {}
+        if not isinstance(loaded, Mapping):
+            raise ConfigError(f"{LOCAL_CONFIG_NAME} must hold settings like config.yaml's 'common' section")
+        current = dict(loaded)
+    merged = deep_merge(current, updates)
+    text = ("# This computer's own settings, applied on top of config.yaml. Git-ignored: never committed.\n"
+            + yaml.safe_dump(merged, sort_keys=False, default_flow_style=False))
+    tmp = path.with_suffix(".yaml.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+    return path

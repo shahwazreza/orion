@@ -12,6 +12,10 @@
 # specific detect rule, and put it ABOVE `jetson` so it matches first.
 #
 # Relative paths are relative to this file's directory.
+#
+# Settings for this machine only (your Outlook client ID, for example) go in
+# config.local.yaml next to this file, in the same shape as `common`. It's
+# git-ignored and applied on top of everything here.
 
 active_profile: auto
 default_profile: laptop
@@ -139,8 +143,8 @@ common:
     cache_s: 900            # repeat searches within 15 minutes use the cached results
   outlook:                  # Phase 3: Outlook mail and calendar, read-only (Microsoft Graph)
     enabled: true
-    client_id: null         # your app registration's Application (client) ID (not a secret);
-                            # setup steps: user manual, "Outlook mail and calendar"
+    client_id: null         # your app registration's Application (client) ID. Put it in the
+                            # git-ignored config.local.yaml, not here (user manual, section 12e)
     tenant: common          # common = personal and work/school accounts | consumers | organizations | tenant ID
     strict_voice: false     # true: every Outlook request needs the strong voice match (people.verify_threshold)
     save_replies: false     # false: the conversation log keeps "(answered from Outlook)", not what was read out

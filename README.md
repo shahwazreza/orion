@@ -215,8 +215,9 @@ Thresholds were calibrated on real embeddings, not guessed (`core/memory.py`,
 - **Read-only by construction:** the app asks only for `Mail.Read` and `Calendars.Read`, and
   the Graph client (`tools/outlook.py`) has a GET method and nothing else, so reading an email
   doesn't even mark it read. A test fails if a write scope is ever added.
-- **Sign-in:** your own Entra app registration (client ID in `outlook.client_id`), device code
-  flow from the terminal (`python main.py outlook connect`). MSAL's token cache is kept per
+- **Sign-in:** your own Entra app registration, then `python main.py outlook setup`: it checks the
+  client ID with Microsoft, picks the right tenant, saves both to the git-ignored
+  `config.local.yaml`, and signs in with the device code flow. MSAL's token cache is kept per
   person in `data/outlook.enc`, AES-256-GCM. The wipe shreds it first; deleting a person
   deletes theirs.
 - **Answers are built by code** (`core/outlook.py`): unread counts, senders, times, subjects,
