@@ -10,6 +10,8 @@
     python main.py secrets [set anthropic | status]
     python main.py audit [N]
     python main.py outlook [setup [NAME] | status | connect [NAME] | disconnect NAME | test [NAME]]
+    python main.py alarm [list]
+    python main.py weather [city "CITY, STATE" [NAME] | test]
 """
 
 from __future__ import annotations
@@ -44,7 +46,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="optional: stop, wipe, killswitch [status | set | test], "
                         "users [list | rename OLD NEW | delete NAME | relearn NAME], notes [list | clear], "
                         "secrets [status | set ...], audit [N], metrics [N], "
-                        "outlook [setup [NAME] | status | connect [NAME] | disconnect NAME | test [NAME]]")
+                        "outlook [setup [NAME] | status | connect [NAME] | disconnect NAME | test [NAME]], "
+                        "alarm [list], weather [city CITY [NAME] | test]")
     return p.parse_args(argv)
 
 
@@ -95,6 +98,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     relearn = None
+    woken = False
+    if args.command[:2] == ["alarm", "wake"]:
+        # Started by the systemd timer for an alarm. If Orion is already running, he rings it himself.
+        from core.lifecycle import ProcessFile
+
+        if ProcessFile().running_pid() is not None:
+            return 0
+        log.info("Started by the alarm timer")
+        args.command, args.text, woken = [], False, True
     if args.command[:2] == ["users", "relearn"]:
         # Voice learning started from the keyboard: the recovery path when Orion no
         # longer recognises someone (even the owner), since by voice he can't tell
@@ -122,8 +134,12 @@ def main(argv: list[str] | None = None) -> int:
             return metrics_cli(cfg, args.command[1:])
         if args.command[0] == "outlook":
             return outlook_cli(cfg, args.command[1:])
+        if args.command[0] == "alarm":
+            return alarm_cli(cfg, args.command[1:])
+        if args.command[0] == "weather":
+            return weather_cli(cfg, args.command[1:])
         log.error("Unknown command %r. Try: stop, wipe, killswitch, users, notes, secrets, audit, metrics, "
-                  "outlook",
+                  "outlook, alarm, weather",
                   args.command[0])
         return 2
 
@@ -137,12 +153,12 @@ def main(argv: list[str] | None = None) -> int:
     pidfile.claim()
     install_stop_signal()
     try:
-        return run(args, cfg, relearn)
+        return run(args, cfg, relearn, woken)
     finally:
         pidfile.release()
 
 
-def run(args, cfg, relearn) -> int:
+def run(args, cfg, relearn, woken: bool = False) -> int:
     from audio.devices import AudioDeviceError
     from audio.tts import AudioPlayer, Chimes, Speaker, make_tts
     from brain.llm import LLMError, make_llm
@@ -199,6 +215,7 @@ def run(args, cfg, relearn) -> int:
     router = make_router(cfg, assistant, knowledge)
     assistant.web = make_web_searcher(cfg, llm, store, knowledge, router)
     assistant.outlook = make_outlook_commands(cfg, assistant, store, getattr(router, "audit", None))
+    make_phase4(cfg, assistant, store, knowledge, getattr(router, "audit", None))
 
     try:
         with timed(f"LLM {llm_cfg['model']}"):
@@ -219,7 +236,7 @@ def run(args, cfg, relearn) -> int:
             run_text(cfg, assistant, speaker, store, notes, knowledge, router, kill_switch)
         else:
             return run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
-                             knowledge=knowledge, router=router, kill_switch=kill_switch)
+                             knowledge=knowledge, router=router, kill_switch=kill_switch, woken=woken)
     except WipeConfirmed:
         wipe = True
     except PassphraseHeard:
@@ -292,7 +309,10 @@ def make_wipe(cfg):
     from security.wipe import SIGN_OUT_HOOKS, Wipe
     from tools.outlook import sign_out_hook
 
-    SIGN_OUT_HOOKS[:] = [sign_out_hook(cfg.path("paths.data"))]     # step 1: Outlook tokens
+    from core.schedule import remove_hook
+
+    SIGN_OUT_HOOKS[:] = [sign_out_hook(cfg.path("paths.data")),     # step 1: Outlook tokens,
+                         remove_hook()]                             # and the alarm timer (holds a time)
     return Wipe(cfg.root, cfg.path("paths.data"), cfg.path("paths.logs"))
 
 
@@ -872,6 +892,238 @@ def outlook_setup(cfg, name: str | None = None, read=input, msal_module=None, sh
     return result
 
 
+# ---- Phase 4: alarms, timers, reminders, weather, briefing ---------------------------------
+def open_schedule(cfg):
+    """Alarms, timers, reminders, and per-person settings, or None without the keyring."""
+    from core.schedule import Schedule
+    from security.keystore import KeyStoreError, get_data_key
+    from storage.db import DatabaseError, open_database
+
+    try:
+        return Schedule(open_database(cfg.path("paths.data"), get_data_key(create=False)))
+    except (KeyStoreError, DatabaseError):
+        return None
+
+
+def make_wakeup_timer(cfg):
+    """The systemd timer that starts Orion for the next alarm, or None when switched off."""
+    from core.schedule import WakeupTimer
+
+    a = cfg.section("alarms")
+    if not a.get("enabled", True) or not a.get("wake_orion", True):
+        return None
+    return WakeupTimer(cfg.root, early_s=float(a.get("start_early_s", 90)))
+
+
+def make_weather(cfg, schedule, store, audit):
+    from core.weather import Weather
+    from tools.weather import OpenMeteo
+
+    w = cfg.section("weather")
+    if not w.get("enabled", True):
+        return None
+    client = OpenMeteo(timeout_s=float(w.get("timeout_s", 10)), cache_s=float(w.get("cache_s", 600)), audit=audit)
+    return Weather(client, schedule, owner=store.owner, units=str(w.get("units", "auto")))
+
+
+def make_phase4(cfg, assistant, store, knowledge, audit) -> None:
+    """Alarm, weather and briefing commands on ``assistant``; the ringer; the wake-up timer."""
+    from core.alarms import AlarmCommands, Ringer
+    from core.briefing import LOGGED_REPLY, SECTIONS, Briefing
+    from core.schedule import GUEST, Schedule, WakeupTimer
+    from core.weather import WeatherCommands
+
+    if knowledge.db is None:
+        log.info("Alarms, reminders and weather: off (no encrypted database this session)")
+        return
+    a, b = cfg.section("alarms"), cfg.section("briefing")
+    schedule = Schedule(knowledge.db)
+
+    def remember(route):
+        return lambda user, q, reply: assistant.remember_tool_exchange(user, q, reply, reply, route=route)
+
+    if a.get("enabled", True):
+        timer = make_wakeup_timer(cfg)
+        if timer is not None:
+            schedule.on_change.append(timer.sync)
+            timer.sync(schedule.next_due())
+        else:
+            WakeupTimer(cfg.root).remove()        # switched off: don't leave one behind
+        assistant.alarms = AlarmCommands(schedule, remember=remember("alarms"))
+        assistant.ringer = Ringer(schedule, lambda uid: None if uid == GUEST else store.get(uid),
+                                  snooze_minutes=float(a.get("snooze_minutes", 9)),
+                                  ring_minutes=float(a.get("ring_minutes", 5)), volume=float(a.get("volume", 0.6)))
+        log.info("Alarms: on (%d set)%s", len(schedule.all()), "" if timer else ", no wake-up timer")
+    weather = make_weather(cfg, schedule, store, audit)
+    if weather is not None:
+        assistant.weather = WeatherCommands(weather, remember=remember("weather"))
+    briefing = Briefing(weather=weather, outlook=assistant.outlook.outlook if assistant.outlook else None,
+                        schedule=schedule if a.get("enabled", True) else None,
+                        sections=b.get("sections") or SECTIONS, timeout_s=float(b.get("timeout_s", 10)),
+                        clean_for=assistant.clean_for,
+                        remember=lambda user, q, reply: assistant.remember_tool_exchange(
+                            user, q, LOGGED_REPLY, LOGGED_REPLY, route="briefing"))
+    assistant.briefing = briefing
+    if assistant.ringer is not None and b.get("after_alarm", True):
+        assistant.ringer.after_morning_alarm = lambda io, user: briefing.run(io, user)
+
+
+def alarm_cli(cfg, args: list[str]) -> int:
+    """What's set, and when the wake-up timer will start Orion."""
+    import subprocess
+    from datetime import datetime
+
+    from core.alarms import describe
+    from core.schedule import GUEST
+    from core.when import local_now
+
+    if args and args[0] != "list":
+        print("Usage: python main.py alarm [list]")
+        return 2
+    schedule = open_schedule(cfg)
+    if schedule is None:
+        print("Can't open the encrypted database (is the keyring unlocked?).")
+        return 1
+    store = open_user_store(cfg)
+    now = local_now()
+    items = schedule.all()
+    if not items:
+        print("No alarms, timers or reminders set.")
+    for i in items:
+        who = "everyone" if i.user_id == GUEST else getattr(store.get(i.user_id), "name", "?")
+        print(f"  {i.due_at(now.tzinfo):%a %d %b %H:%M}  {i.kind:<8}  {who:<10}  {describe(i, now)}")
+    timer = make_wakeup_timer(cfg)
+    if timer is None:
+        print("\nWake-up timer: off (alarms.wake_orion: false). Alarms ring only while Orion is running.")
+    elif not timer.timer_path.exists():
+        print("\nWake-up timer: none (nothing set).")
+    else:
+        when = next((ln.split("=", 1)[1] for ln in timer.timer_path.read_text().splitlines()
+                     if ln.startswith("OnCalendar=")), "?")
+        state = subprocess.run(["systemctl", "--user", "is-active", "orion-alarm.timer"], capture_output=True,
+                               text=True).stdout.strip() or "unknown"
+        print(f"\nWake-up timer: {state}, starts Orion at {when} if he isn't running.")
+    return 0
+
+
+def weather_cli(cfg, args: list[str]) -> int:
+    """Each person's weather city; set one; or time a forecast."""
+    import json
+    import time as _time
+
+    from core.weather import SETTING
+    from tools.weather import Place, WeatherError
+
+    schedule = open_schedule(cfg)
+    store = open_user_store(cfg)
+    if schedule is None or not store.persistent:
+        print("Can't open the encrypted database (is the keyring unlocked?).")
+        return 1
+    weather = make_weather(cfg, schedule, store, open_audit(cfg))
+    if weather is None:
+        print("Weather is switched off (weather.enabled: false in config.yaml).")
+        return 1
+    if not args:
+        for u in store.all():
+            raw = schedule.setting(u.id, SETTING)
+            print(f"  {u.name:<20} {Place.from_dict(json.loads(raw)).spoken if raw else '(no city set)'}")
+        print('\nSet one with: python main.py weather city "Tampa, Florida" [NAME]')
+        return 0
+    if args[0] == "city" and len(args) in (2, 3):
+        user = store.find(args[2]) if len(args) == 3 else store.owner()
+        if user is None:
+            print(f"No user called {args[2]!r}." if len(args) == 3 else "No owner yet. Start Orion first.")
+            return 1
+        try:
+            places = weather.client.find(args[1], count=5)
+        except WeatherError as exc:
+            print(exc.spoken)
+            return 1
+        if not places:
+            print(f"Nothing found for {args[1]!r}. Try the city with its state or country.")
+            return 1
+        for n, p in enumerate(places, 1):
+            print(f"  {n}. {p.spoken}")
+        choice = input("Which one? Number, or Enter to cancel: ").strip()
+        if not choice.isdigit() or not 1 <= int(choice) <= len(places):
+            print("Cancelled.")
+            return 1
+        weather.save_place(user, places[int(choice) - 1])
+        print(f"Saved {places[int(choice) - 1].spoken} for {user.name} (encrypted).")
+        return 0
+    if args[0] == "test":
+        user = store.owner()
+        place = weather.place_for(user)
+        if place is None:
+            print('No city set. Run: python main.py weather city "Tampa, Florida"')
+            return 1
+        for run in range(3):
+            weather.client._cache.clear()
+            t = _time.perf_counter()
+            try:
+                fc = weather.forecast(place)
+            except WeatherError as exc:
+                print(exc.spoken)
+                return 1
+            print(f"  forecast {run + 1}: {(_time.perf_counter() - t) * 1000:.0f} ms")
+        print(weather.today_line(fc))
+        return 0
+    print('Usage: python main.py weather [city "CITY, STATE" [NAME] | test]')
+    return 2
+
+
+class TextRing:
+    """Text mode: alarms ring on a background thread; while one rings, typed lines answer it."""
+
+    def __init__(self, ringer, speaker) -> None:
+        import queue
+        import threading
+
+        self.ringer, self.speaker = ringer, speaker
+        self.lines: queue.Queue[str] = queue.Queue()
+        self.active = False
+        threading.Thread(target=self._watch, name="text-ring", daemon=True).start()
+
+    def _watch(self) -> None:
+        while True:
+            time.sleep(0.5)
+            if self.active or not self.ringer.schedule.has_due():
+                continue
+            self.active = True
+            print("\n[Something's going off. Type 'stop' or 'snooze'.]", flush=True)
+            try:
+                self.ringer.go_off(self)
+            except Exception:
+                log.exception("Alarm failed")
+            finally:
+                self.active = False
+                print("You: ", end="", flush=True)
+
+    def say(self, text: str) -> None:
+        self.speaker.say(text)
+        self.speaker.wait()
+
+    def ring(self, volume: float) -> None:
+        from core.alarms import ring_tone
+
+        if self.speaker.player is None:
+            time.sleep(1.0)
+            return
+        self.speaker.play(ring_tone(self.speaker.player.sample_rate, volume))
+        self.speaker.wait()
+
+    def chime(self) -> None:
+        pass
+
+    def hear(self, timeout_s: float) -> str | None:
+        import queue
+
+        try:
+            return self.lines.get(timeout=timeout_s)
+        except queue.Empty:
+            return None
+
+
 def open_audit(cfg):
     """The encrypted audit log, or None if the database can't be opened."""
     from security.keystore import KeyStoreError, get_data_key
@@ -1012,6 +1264,11 @@ def run_text(cfg, assistant, speaker, store, notes, knowledge=None, router=None,
     assistant.confirm = confirm
     if convo_cmds is not None:
         convo_cmds.log.start_conversation(identity.current)
+    ring = None
+    if assistant.ringer is not None:
+        for missed in assistant.ringer.catch_up():
+            dialog.say(missed)
+        ring = TextRing(assistant.ringer, speaker)
     while True:
         try:
             line = input("You: ").strip()
@@ -1021,6 +1278,9 @@ def run_text(cfg, assistant, speaker, store, notes, knowledge=None, router=None,
             continue
         if line in ("/quit", "/exit"):
             return
+        if ring is not None and ring.active and not is_shutdown(line):
+            ring.lines.put(line)          # answers whatever is ringing
+            continue
         if kill_switch is not None and kill_switch.matches(line):
             # Typed passphrase (visible as you type it; `python main.py wipe` hides it).
             answer = input("Wipe everything I know? Type 'confirm wipe': ")
@@ -1060,7 +1320,13 @@ def run_text(cfg, assistant, speaker, store, notes, knowledge=None, router=None,
             continue
         if convo_cmds is not None and convo_cmds.handle(Heard(line), dialog, identity.current):
             continue
-        # Mail and calendar: always local, before the router.
+        # Briefing, alarms, weather, mail and calendar: always local, before the router.
+        if assistant.briefing is not None and assistant.briefing.handle(Heard(line), dialog, identity.current):
+            continue
+        if assistant.alarms is not None and assistant.alarms.handle(Heard(line), dialog, identity.current):
+            continue
+        if assistant.weather is not None and assistant.weather.handle(Heard(line), dialog, identity.current):
+            continue
         if assistant.outlook is not None and assistant.outlook.handle(Heard(line), dialog, identity.current):
             continue
         decision = router.decide(line, identity.current.id if identity.current else "guest") if router else None
@@ -1121,6 +1387,11 @@ def users_cli(cfg, args: list[str]) -> int:
         auth = open_outlook_auth(cfg)
         if auth is not None and auth.disconnect(u.id):
             print(f"Forgot {u.name}'s Outlook sign-in.")
+        schedule = open_schedule(cfg)
+        if schedule is not None:
+            n = schedule.delete_user(u.id)
+            if n:
+                print(f"Deleted {u.name}'s {n} alarms, timers and reminders.")
         print(f"Deleted {u.name}.")
         return 0
     print("Usage: python main.py users [list | rename OLD NEW | delete NAME]")
@@ -1128,7 +1399,7 @@ def users_cli(cfg, args: list[str]) -> int:
 
 
 def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
-              relearn: str | None = None, knowledge=None, router=None, kill_switch=None) -> int:
+              relearn: str | None = None, knowledge=None, router=None, kill_switch=None, woken: bool = False) -> int:
     from audio.devices import AudioDeviceError, Microphone
     from audio.stt import make_stt
     from audio.vad import Endpointer, SileroVAD
@@ -1223,6 +1494,9 @@ def run_voice(cfg, assistant, speaker, chimes, models_dir, store, notes,
     loop.router = router
     loop.audit = getattr(router, "audit", None)
     loop.outlook_commands = assistant.outlook
+    loop.alarm_commands, loop.weather_commands = assistant.alarms, assistant.weather
+    loop.briefing, loop.ringer = assistant.briefing, assistant.ringer
+    loop.quiet_start = woken
     loop.kill_switch = kill_switch
     from core.dialog import yes_no
 
