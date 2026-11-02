@@ -1,6 +1,6 @@
 # Orion user manual
 
-**Version:** Phase 2 (memory, conversations, rules, Claude mode, web search) on top of Phase 1, October 2026.
+**Version:** Phase 4 (alarms, timers, reminders, weather, morning briefing) on top of Phases 1 to 3, November 2026.
 
 Orion is a private voice assistant that runs entirely on your own computer.
 You talk to him; he listens, works out who you are, thinks with a local language
@@ -30,6 +30,7 @@ details (architecture, tests, benchmarks), see the [README](../README.md).
 12c. [Web search](#12c-web-search)
 12d. [Kill switches and mute](#12d-kill-switches-and-mute)
 12e. [Outlook mail and calendar](#12e-outlook-mail-and-calendar)
+12f. [Alarms, timers, reminders, weather and the morning briefing](#12f-alarms-timers-reminders-weather-and-the-morning-briefing)
 13. [Terminal command reference](#13-terminal-command-reference)
 14. [Settings reference](#14-settings-reference)
 15. [Your privacy: what's stored and where](#15-your-privacy-whats-stored-and-where)
@@ -60,6 +61,8 @@ details (architecture, tests, benchmarks), see the [README](../README.md).
 - **Ask Claude** for you, only when you say so, with nothing personal sent unless you allow it.
 - **Check your Outlook email and calendar**, read-only: new emails, who they're from, a short
   summary or the full text, what's on today, and whether you're free (section 12e).
+- **Set alarms, timers and reminders**, tell you the **weather**, and give you a **morning
+  briefing**; he can even start himself for an alarm (section 12f).
 - Run in text mode, where you type instead of talk.
 - **Shut down on command** ("Orion, shut down"), **mute** ("stop listening"), and erase
   everything with your secret **wipe passphrase** (section 12d).
@@ -68,15 +71,14 @@ details (architecture, tests, benchmarks), see the [README](../README.md).
 
 | Not yet | Coming in |
 |---|---|
-| Alarms, morning briefing | Phase 4 |
 | Meeting notes | Phase 5 |
 | Build software for you | Phase 7 |
 
 Ask him about any of these and he tells you he can't do it yet. For live or personal
-information (weather, the news, prices, scores, alarms and reminders, and email or
-calendar requests beyond what section 12e lists) that answer is built in: *"I can't check the weather yet. That's coming
-with the morning briefing, and I won't guess."* The model never gets the chance to
-make something up. Ordinary questions about those topics ("how does weather form?",
+information (the news, prices, scores, and email, calendar, weather or alarm requests
+beyond what sections 12e and 12f list) that answer is built in: *"I can't answer that
+about the weather. I can tell you the weather now, the forecast for the week, and the
+chance of rain, but I won't guess."* The model never gets the chance to make something up. Ordinary questions about those topics ("how does weather form?",
 "how do I write a professional email?") are still answered normally.
 
 ---
@@ -816,6 +818,105 @@ computer's time zone.
 If the internet is down, the sign-in has expired, or Outlook is busy, he says which.
 He never guesses an email or an event.
 
+## 12f. Alarms, timers, reminders, weather and the morning briefing
+
+### Alarms, timers and reminders
+
+| Say | What happens |
+|---|---|
+| "Set an alarm for 7" | The next 7 o'clock that comes round. He says which: "Alarm set for 7 AM tomorrow." |
+| "Wake me up at 6:30" | Always the morning |
+| "Alarm for 7 PM tomorrow" / "Alarm at 17:45" | Exactly that |
+| "Alarm for 7 every weekday" / "every day at 8" / "every Monday and Wednesday at 6" / "on weekends at 9" | A repeating alarm |
+| "Set a timer for 10 minutes" / "10 minute timer" / "timer for an hour and a half" | A timer, up to 24 hours |
+| "Pasta timer for 8 minutes" | A named timer: "Your pasta timer is done." |
+| "Remind me to call Mom at 5" / "Remind me at 5 to call Mom" | A reminder. No time? He asks "When?" |
+| "Remind me in 20 minutes to check the oven" / "tomorrow at 9 to submit the form" / "tomorrow morning to take out the trash" | Morning without an hour means 9 AM |
+| "What alarms do I have?" / "When's my alarm?" / "What are my reminders?" | Your own, soonest first |
+| "How long left on the timer?" | Every timer and what's left |
+| "Cancel my 7 AM alarm" / "Cancel the pasta timer" / "Delete the reminder about Mom" | If it's unclear which, he asks |
+| "Cancel all my alarms" | All of them |
+
+A bare hour on another day: for an alarm, 4 to 11 is the morning ("alarm for 7 tomorrow"
+is 7 AM); for a reminder, 8 to 11 is the morning and 12 to 7 the afternoon or evening
+("remind me tomorrow at 5" is 5 PM), as for the calendar. He always reads back the time and day, so
+if he heard you wrong, just cancel it and say it again.
+
+**Whose is it?** Alarms and reminders belong to whoever set them: each person hears and
+cancels only their own. Timers are for anyone, including people Orion doesn't recognise
+(a guest's timer is everyone's).
+
+### When something goes off
+
+- **Alarm:** "It's 7 AM, Reza," then a ring that gets louder, with short pauses where he
+  listens. Say **"stop"**, "I'm up", or "okay" to stop it; **"snooze"** for 9 minutes, or
+  "snooze for 5 minutes". No wake word needed, and anyone can stop it. After 5 minutes
+  without an answer he gives up.
+- **Timer:** "Your 10 minute timer is done," and the same ring.
+- **Reminder:** a chime, then "Reza, a reminder: call your mom." Say "remind me again in 10
+  minutes" if you need longer.
+- **Morning alarms** (set between 4 and 11 AM): when you stop one, the morning briefing
+  follows.
+- Muted ("stop listening"), alarms and timers still ring and "stop" still works.
+- Anything due while he's talking goes off as soon as he finishes.
+- In text mode the ring plays and the terminal says what went off; type `stop` or `snooze`.
+
+### When Orion isn't running
+
+Orion keeps a systemd timer set for the next alarm, timer or reminder. 90 seconds before it,
+the timer starts Orion quietly (no "Orion online") so the models are loaded in time, and he
+rings on time. He stays running afterwards; stop him with "Orion, shut down" or
+`python main.py stop`. `python main.py alarm` shows what's set and when the timer will fire.
+
+It works when the computer is **on, awake, and you're logged in** (the timer runs in your
+session, which has the speakers and the keyring). A sleeping laptop doesn't wake up for it,
+so for an important alarm, keep the laptop awake and plugged in. Things that came due while
+Orion couldn't run are dealt with when he next starts: an alarm less than 5 minutes late
+rings, an older one is mentioned ("You missed an alarm at 7 AM"), and a missed reminder is
+said late.
+
+The timer file holds only a time: no name, label, or reminder. Turn it off with
+`alarms.wake_orion: false`.
+
+### Weather
+
+No city is built in. Set yours once:
+
+| Say | What happens |
+|---|---|
+| "Set my city to Tampa" / "Change my weather location to Austin, Texas" | He reads back each match ("Tampa, Florida, United States. Is that right?") until you say yes |
+| "What city are you using?" | The one he's got |
+| "What's the weather?" | Now, plus today's high, low, and chance of rain |
+| "What's the weather tomorrow?" / "on Friday" / "this weekend" | The forecast, up to a week ahead |
+| "Will it rain tomorrow?" / "Do I need an umbrella?" | Yes, maybe, or no, with the chance of rain |
+| "How hot is it?" / "Is it going to snow?" | Temperature now (and what it feels like); snow in the forecast |
+| "What's the weather in London?" | Somewhere else, just this once (not saved) |
+
+Or from the terminal: `python main.py weather city "Tampa, Florida"` (add a name to set
+someone else's). People without a city, and people Orion doesn't recognise, get the owner's.
+Temperatures are Fahrenheit in the US and Celsius elsewhere (`weather.units`).
+
+Weather comes from **Open-Meteo**, free and without an account. It gets the city name once
+when you set it, then coordinates rounded to about 1 km. Every number he says comes from the
+forecast; if the service can't be reached he says so and never guesses. The audit log notes
+each weather request but never the place.
+
+### Morning briefing
+
+Say **"good morning"** (before noon), **"brief me"**, or **"what's my day look like?"**, or
+stop a morning alarm. In order:
+
+1. "Good morning, Reza. It's 7:02 on Monday, 2 November."
+2. The weather.
+3. Today's calendar (if Outlook is connected).
+4. How many unread emails, and from whom. No summaries; ask to read one afterwards.
+5. Your alarms, timers and reminders still to come today, and your next alarm.
+
+Parts without data are skipped. A part that takes longer than 10 seconds is skipped with a
+word. People Orion doesn't recognise get the greeting and the weather only. Your
+conversation history keeps "(morning briefing)", not what he read out. Choose the parts and
+their order with `briefing.sections`.
+
 ## 13. Terminal command reference
 
 Run these from `~/orion` with the environment active.
@@ -873,6 +974,16 @@ Run these from `~/orion` with the environment active.
 | `python main.py outlook connect [NAME]` | Sign in with a code (the owner if no name is given) |
 | `python main.py outlook test [NAME]` | Check the sign-in and time a few read-only requests. Shows counts only |
 | `python main.py outlook disconnect NAME` | Forget that person's sign-in on this computer |
+
+### Alarms and weather
+
+| Command | Purpose |
+|---|---|
+| `python main.py alarm` | Every alarm, timer and reminder, and when the systemd timer will next start Orion |
+| `python main.py weather` | Each person's weather city |
+| `python main.py weather city "Tampa, Florida" [NAME]` | Look up a city, pick the right match, save it (yours, or NAME's) |
+| `python main.py weather test` | Time three forecast requests and show today's weather |
+| `systemctl --user list-timers orion-alarm.timer` | systemd's own view of the wake-up timer |
 
 ### Training notes
 
@@ -992,6 +1103,23 @@ See section 11: `tts.backend`, `tts.kokoro.*`, `tts.piper.*`.
 | `outlook.save_replies` | `false` | Keep what he read out in the conversation history (encrypted) |
 | `backups.keep` | `30` | Daily encrypted database backups kept |
 
+### Alarms, weather and briefing
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `alarms.enabled` | `true` | Alarms, timers and reminders |
+| `alarms.snooze_minutes` | `9` | How long "snooze" lasts |
+| `alarms.ring_minutes` | `5` | Give up ringing after this long |
+| `alarms.volume` | `0.6` | Loudest the ring gets (0 to 1); it starts quieter |
+| `alarms.wake_orion` | `true` | Keep a systemd timer that starts Orion for the next alarm |
+| `alarms.start_early_s` | `90` | How early the timer starts him, so the models are loaded |
+| `weather.enabled` | `true` | Weather from Open-Meteo |
+| `weather.units` | `auto` | `auto` (Fahrenheit in the US), `fahrenheit` or `celsius` |
+| `weather.cache_s` | `600` | Reuse a forecast for this long |
+| `briefing.after_alarm` | `true` | Brief you after a morning alarm |
+| `briefing.sections` | `[weather, calendar, email, schedule]` | Which parts, in what order |
+| `briefing.timeout_s` | `10` | Skip a part that takes longer |
+
 ### Data and logs
 
 | Setting | Default | Meaning |
@@ -1008,8 +1136,9 @@ See section 11: `tts.backend`, `tts.kokoro.*`, `tts.piper.*`.
 
 **Nothing personal leaves your computer.** Orion goes online only to search the web
 (generic queries, no personal details), when you ask for Claude (nothing personal
-unless you say "include..."), and to fetch your own Outlook mail and calendar from
-Microsoft when you ask. All three are logged in the encrypted audit log. He also opens no network ports, and refuses to
+unless you say "include..."), to fetch your own Outlook mail and calendar from
+Microsoft when you ask, and to get the weather from Open-Meteo (your city's rounded
+coordinates). All four are logged in the encrypted audit log. He also opens no network ports, and refuses to
 start if Ollama is reachable from the network.
 
 | What | Stored? | Where |
@@ -1024,6 +1153,8 @@ start if Ollama is reachable from the network.
 | Your wipe passphrase | **Never.** Only a salted Argon2id hash, **encrypted** | `data/killswitch.enc` |
 | Your emails and calendar events | **Never.** Fetched when you ask, kept in memory for 10 minutes | none |
 | Outlook sign-ins (tokens) | Yes, **encrypted** (AES-256), per person | `data/outlook.enc` |
+| Alarms, timers, reminders, weather city | Yes, **encrypted** (SQLCipher), per person | `data/orion.db` |
+| The time of the next alarm (no name or label) | Yes, plain text, so systemd can start Orion. The wipe deletes it | `~/.config/systemd/user/orion-alarm.timer` |
 | The encryption key | In KDE Wallet, never on disk or in git | your system keyring |
 | Speed and memory metrics | Yes, **encrypted**, numbers only | `logs/metrics.enc` |
 
