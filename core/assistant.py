@@ -50,6 +50,10 @@ class Assistant:
         self.cloud_sessions: dict[str, Conversation] = {}   # Claude-mode history, per person
         self.web = None                 # core.web_search.WebSearcher, set by main when enabled
         self.outlook = None             # core.outlook.OutlookCommands, set by main (Phase 3)
+        self.alarms = None              # core.alarms.AlarmCommands (Phase 4)
+        self.weather = None             # core.weather.WeatherCommands (Phase 4)
+        self.briefing = None            # core.briefing.Briefing (Phase 4)
+        self.ringer = None              # core.alarms.Ringer: rings alarms and timers when due
         # Yes/no question to the person (set by the voice loop / text mode).
         self.confirm = lambda prompt: False
         self.log = conversations        # core.conversations.ConversationLog (Phase 2), optional
@@ -123,7 +127,8 @@ class Assistant:
         conversation = self.conversation_for(user)
         conversation.context = self._context_for(user, user_text)
         refusal = unsupported(user_text, searchable=self.web is not None and self.web.enabled,
-                              outlook=self.outlook is not None)
+                              outlook=self.outlook is not None, alarms=self.alarms is not None,
+                              weather=self.weather is not None)
         if refusal is not None:
             # Needs live or personal data Orion doesn't have: never let the model guess.
             self.speaker.begin(on_first_audio=lambda: turn.mark("first_audio"))

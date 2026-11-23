@@ -149,8 +149,25 @@ common:
     strict_voice: false     # true: every Outlook request needs the strong voice match (people.verify_threshold)
     save_replies: false     # false: the conversation log keeps "(answered from Outlook)", not what was read out
     timeout_s: 15
+  alarms:                   # Phase 4: alarms, timers, reminders (encrypted, in data/orion.db)
+    enabled: true
+    snooze_minutes: 9
+    ring_minutes: 5         # nobody stops it: give up after this long
+    volume: 0.6             # loudest the ring gets (0-1); it starts quieter and builds up
+    wake_orion: true        # a systemd user timer starts Orion for the next alarm if he isn't running.
+                            # It holds only a time. Needs you logged in; a sleeping laptop won't wake.
+    start_early_s: 90       # ...this long before, so the models are loaded in time
+  weather:                  # Phase 4: Open-Meteo (free, no key). Set your city by voice ("set my city to
+    enabled: true           # Tampa") or: python main.py weather city "Tampa, Florida"
+    units: auto             # auto (Fahrenheit in the US, Celsius elsewhere) | fahrenheit | celsius
+    cache_s: 600
+    timeout_s: 10
+  briefing:                 # "good morning", "brief me", or after a morning alarm (set 4 to 11 AM)
+    after_alarm: true
+    sections: [weather, calendar, email, schedule]   # order; drop any you don't want
+    timeout_s: 10           # a part that takes longer is skipped
   router:
-    auto: false             # true: plain general-knowledge questions with nothing personal go to Claude
+    auto: false            # true: plain general-knowledge questions with nothing personal go to Claude
 
   memory:
     enabled: true           # "remember that..." facts, per person, encrypted, never expire

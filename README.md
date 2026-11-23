@@ -11,6 +11,8 @@ Jetson Orin Nano (aarch64, CUDA), with hardware choices in `config.yaml` profile
 > **Phase 6 done:** custom "hey orion" wake word, trained with the Colab notebook.
 > **Phase 3 built:** read-only Outlook mail and calendar (Microsoft Graph, device code sign-in),
 > awaiting live testing with a real account ([spec](docs/specs/phase-3.md)).
+> **Phase 4 built:** alarms, timers, reminders, weather (Open-Meteo) and the morning briefing,
+> with a systemd timer that starts Orion for an alarm; awaiting live testing ([spec](docs/specs/phase-4.md)).
 > Wake word → listen → who's speaking? → transcribe → reply → speak.
 
 ```
@@ -23,10 +25,10 @@ Jetson Orin Nano (aarch64, CUDA), with hardware choices in `config.yaml` profile
 **Using Orion:** see the [user manual](docs/user-manual.md) for every command,
 setting, and what to expect. This README is the developer overview.
 
-**Honest about limits:** requests that need data Orion doesn't have yet (weather,
-email, calendar, news, prices, scores, alarms) get a fixed "I can't do that yet,
-and I won't guess" before the model sees them (`brain/capabilities.py`). A live test
-caught the 3B model inventing a forecast despite its instructions.
+**Honest about limits:** requests that need data Orion doesn't have get a fixed "I can't
+do that, and I won't guess" before the model sees them (`brain/capabilities.py`). A live
+test caught the 3B model inventing a forecast despite its instructions, so weather,
+email, calendar and alarms are answered by code from real data, never by the model.
 
 ## Design principles
 
@@ -232,6 +234,32 @@ Thresholds were calibrated on real embeddings, not guessed (`core/memory.py`,
   deterministically in the system time zone, daylight-saving aware.
 
 Setup and every phrase: [user manual, section 12e](docs/user-manual.md#12e-outlook-mail-and-calendar).
+
+## Alarms, weather, morning briefing (Phase 4)
+
+- **Alarms, timers, reminders** (`core/alarms.py`, `core/schedule.py`): "wake me up at 6:30",
+  "alarm for 7 every weekday", "pasta timer for 8 minutes", "remind me at 5 to call Mom". Times
+  are parsed by code (`core/when.py`: a bare hour is the next time it comes round, "wake me"
+  means the morning, repeats keep wall-clock time across daylight saving) and read back with
+  the day. Kept per person in the encrypted database; guests get timers only.
+- **Ringing:** a generated tone that builds up, with three-second gaps where Orion listens for
+  "stop" or "snooze" without the wake word (a short end-of-speech pause, so it reacts quickly).
+  "Shut down" and the wipe passphrase still work. It gives up after five minutes.
+- **When Orion isn't running:** one systemd user timer (`orion-alarm.timer`) is kept set 90 s
+  before the next thing due and starts `main.py alarm wake`, which loads the models quietly and
+  rings on time. The unit files hold a time and nothing else; stdout (transcripts) goes to
+  `/dev/null`, never the journal; the wipe deletes them. Things missed while the computer was off
+  are reported at start-up.
+- **Weather** (`tools/weather.py`, `core/weather.py`): Open-Meteo, no key. Each person sets a
+  city by voice ("set my city to Tampa", read back for confirmation) or `python main.py weather
+  city`; coordinates are rounded to about 1 km and the audit log never holds the place. Every
+  number is spoken by code from the forecast.
+- **Briefing** (`core/briefing.py`): greeting, weather, today's calendar, unread email count and
+  senders, and what's still to come, fetched in parallel with per-part timeouts. Runs on "good
+  morning" / "brief me", or after a morning alarm is stopped. Strangers get the greeting and
+  weather only; the conversation log keeps "(morning briefing)", not the content.
+
+Every phrase and setting: [user manual, section 12f](docs/user-manual.md#12f-alarms-timers-reminders-weather-and-the-morning-briefing).
 
 ## Language
 
@@ -469,7 +497,8 @@ update its URL, blank its hash, run the script, then pin the printed hash.
   ([spec](docs/specs/phase-2.5.md)) *(built; awaiting live voice testing)*
 - [x] Phase 3: Outlook mail and calendar (Microsoft Graph, device code flow, read-only)
   ([spec](docs/specs/phase-3.md)) *(built; awaiting live testing with a real account)*
-- [ ] Phase 4: Alarms and morning briefing
+- [x] Phase 4: Alarms, timers, reminders, weather, morning briefing
+  ([spec](docs/specs/phase-4.md)) *(built; awaiting live testing)*
 - [ ] Phase 5: Local meeting notes
 - [x] Phase 6: Custom "hey orion" wake word *(trained with the Colab notebook, in use; tune with
   `scripts/wakeword_test.py`, see [docs/wake-word.md](docs/wake-word.md))*

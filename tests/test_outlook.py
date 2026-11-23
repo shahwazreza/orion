@@ -261,9 +261,10 @@ def test_make_wipe_registers_the_outlook_hook_first(tmp_path):
 
     cfg = SimpleNamespace(root=tmp_path, path=lambda key: tmp_path / key.split(".")[1])
     main.make_wipe(cfg)
-    assert len(wipe_module.SIGN_OUT_HOOKS) == 1
+    assert len(wipe_module.SIGN_OUT_HOOKS) == 2             # Outlook tokens, then the alarm timer (Phase 4)
+    assert wipe_module.SIGN_OUT_HOOKS[0].__qualname__.startswith("sign_out_hook")
     main.make_wipe(cfg)                                     # not added twice
-    assert len(wipe_module.SIGN_OUT_HOOKS) == 1
+    assert len(wipe_module.SIGN_OUT_HOOKS) == 2
 
 
 # ---- Graph -----------------------------------------------------------------------------

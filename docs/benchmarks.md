@@ -187,3 +187,26 @@ dorm Wi-Fi, three runs; the first includes MSAL contacting Microsoft):
 
 "Any new emails?" makes the count and list calls, so expect about 1 s before Orion
 starts speaking.
+
+## Phase 4 — alarms, weather, briefing (laptop, 2026-11-02)
+
+**Open-Meteo latency** (dorm Wi-Fi, five runs each, cache cleared between runs):
+
+| Request | Time |
+|---|---|
+| Geocoder ("Tampa, Florida", only when a city is set) | median 228 ms, 133 to 637 ms (the first, cold) |
+| Forecast (7 days, current conditions) | median 48 ms, 47 to 190 ms (the first, cold) |
+| Forecast from the 10-minute cache | under 0.1 ms |
+
+**Briefing, data only** (`core/briefing.py` with live weather, no Outlook, four runs): the
+greeting is ready at once (1 to 16 ms) because the parts are fetched in parallel while it is
+spoken; the weather sentence is ready 158 to 511 ms after it. Kokoro takes longer than that to
+say the greeting, so the weather never makes him pause. With Outlook connected, the calendar and
+email parts add the Graph times from Phase 3 (about 0.3 to 1 s), also hidden behind speech.
+
+**The systemd units** written by `core/schedule.py` pass `systemd-analyze --user verify`, and
+the timer's `OnCalendar` parses to the expected local time.
+
+Still to measure on the device: time from the systemd timer firing to Orion ready to ring
+(models loading under systemd; `start_early_s: 90` assumes under a minute), and whether
+"stop" is heard reliably over the ring through the laptop speakers.

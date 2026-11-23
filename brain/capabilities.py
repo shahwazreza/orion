@@ -5,8 +5,9 @@ forecast (seen live: "a high of twenty-five degrees with scattered showers").
 For anything that needs live or personal data Orion doesn't have yet, a fixed
 answer is the only reliable way to never make things up. Each entry is removed
 when the phase that adds the real tool lands; the Phase 2 router takes over.
-Email and calendar stay listed: Phase 3's Outlook commands answer first, and
-whatever they don't understand is still refused here rather than guessed.
+Email, calendar, weather, and alarms stay listed: the Phase 3 and 4 commands
+answer first, and whatever they don't understand is still refused here rather
+than guessed.
 """
 
 from __future__ import annotations
@@ -43,19 +44,27 @@ _SEARCHABLE = {"check the weather", "get the news", "look up live prices or scor
 _OUTLOOK = {"read your email": "email", "see your calendar": "calendar"}
 
 
-def unsupported(text: str, searchable: bool = False, outlook: bool = False) -> str | None:
+def unsupported(text: str, searchable: bool = False, outlook: bool = False, alarms: bool = False,
+                weather: bool = False) -> str | None:
     """A spoken, honest refusal if ``text`` needs a capability Orion lacks, else None.
 
-    ``outlook``: the Outlook commands are wired in. Requests they didn't take are ones
-    Orion can't do with mail or calendar yet ("summarise last week's emails").
+    ``outlook``, ``alarms``, ``weather``: those commands are wired in (Phases 3 and 4).
+    Requests they didn't take are ones Orion can't do with them yet ("summarise last
+    week's emails", "set an alarm on my phone").
     """
     t = text.lower()
     for pattern, ability, when in _UNSUPPORTED:
-        if searchable and ability in _SEARCHABLE:
+        if searchable and ability in _SEARCHABLE and not (weather and ability == "check the weather"):
             continue
         if pattern.search(t):
             if outlook and ability in _OUTLOOK:
                 return (f"I can't do that with your {_OUTLOOK[ability]} yet. I can check for new emails, read "
                         "them, and tell you what's on your calendar, but I won't guess.")
+            if alarms and ability == "set alarms, timers or reminders":
+                return ("I can't do that one. I can set alarms, timers and reminders here on this computer, "
+                        "list them, and cancel them.")
+            if weather and ability == "check the weather":
+                return ("I can't answer that about the weather. I can tell you the weather now, the forecast "
+                        "for the week, and the chance of rain, but I won't guess.")
             return f"I can't {ability} yet. That's coming {when}, and I won't guess."
     return None

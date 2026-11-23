@@ -61,6 +61,11 @@ class VoiceLoop:
         self.rule_commands = None            # core.rules.RuleCommands
         self.rules = None                    # core.rules.RuleBook (checked after each reply)
         self.outlook_commands = None         # core.outlook.OutlookCommands (Phase 3)
+        self.alarm_commands = None           # core.alarms.AlarmCommands (Phase 4)
+        self.weather_commands = None         # core.weather.WeatherCommands
+        self.briefing = None                 # core.briefing.Briefing
+        self.ringer = None                   # core.alarms.Ringer: rings whatever is due
+        self.quiet_start = False             # started by the alarm timer: no "Orion online"
         self.router = None                   # core.router.Router (local vs Claude)
         self.audit = None                    # storage.audit.AuditLog
         self.kill_switch = None              # security.killswitch.KillSwitch (the wipe passphrase)
@@ -144,17 +149,81 @@ class VoiceLoop:
             self.show(f"You: {text}")
         return Heard(text, audio, self.mic.sample_rate)
 
+    # ---- alarms (the ringer's RingIO) ----------------------------------------
+    def ring(self, volume: float) -> None:
+        """One ring, then wait until it has played."""
+        from core.alarms import ring_tone
+
+        rate = getattr(getattr(self.speaker, "player", None), "sample_rate", None) or \
+            getattr(getattr(self.speaker, "tts", None), "sample_rate", 24000)
+        self.speaker.play(ring_tone(rate, volume))
+        self.speaker.wait()
+
+    def chime(self) -> None:
+        self._chime("listening")
+        self.speaker.wait()
+
+    def hear(self, timeout_s: float) -> str | None:
+        """A short reply while something rings ("stop", "snooze"): no wake word, no chime,
+        and a short pause ends it. "Shut down" and the wipe passphrase still work."""
+        self.mic.drain()                          # not the ring itself
+        self.wake.reset()
+        saved = self.endpointer.end_frames
+        self.endpointer.end_frames = max(1, 700 // self.endpointer.chunk_ms)
+        try:
+            self.endpointer.reset(start_timeout_s=timeout_s)
+            status = Status.WAITING
+            while status in (Status.WAITING, Status.SPEAKING):
+                frame = self.mic.read(timeout=1.0)
+                if frame is None:
+                    return None
+                status = self.endpointer.push(frame)
+            if status is Status.TIMEOUT:
+                return None
+            audio = self.endpointer.audio()
+        finally:
+            self.endpointer.end_frames = saved
+        try:
+            text = self.stt.transcribe(audio, self.mic.sample_rate)
+        except Exception:
+            log.exception("Transcription failed")
+            return None
+        del audio
+        if text and self.kill_switch is not None and self.kill_switch.matches(
+                strip_wake_phrase(text, self.wake_phrases)):
+            raise PassphraseHeard()
+        text = strip_wake_phrase(text or "", self.wake_phrases)
+        if is_shutdown(text):
+            self.shut_down()
+        if text:
+            self.show(f"You: {text}")
+        return text or None
+
+    def _due(self) -> bool:
+        return self.ringer is not None and self.ringer.schedule.has_due()
+
+    def _go_off(self) -> None:
+        self.ringer.go_off(self)
+        self.show(f"[waiting for '{self._wake_phrase}']")
+
     # ---- main loop ----------------------------------------------------------
     def run(self, wake_phrase: str) -> None:
         self._wake_phrase = wake_phrase
         self.mic.start()
         with self._sampling_echo():
-            if self.people is not None:
+            if self.quiet_start and self.people is not None and not self.people.store.is_empty():
+                pass                              # woken for an alarm: it speaks for itself
+            elif self.people is not None:
                 self._guarded(lambda: self.people.greet_on_start(self))
             else:
                 self.say("Orion online.")
+        if self.ringer is not None:
+            for line in self.ringer.catch_up():
+                self.say(line)
         self.show(f"Listening for '{wake_phrase}'. Ctrl+C to quit.")
         while True:
+            if self._due():
+                self._guarded(self._go_off)
             frame = self.mic.read(timeout=1.0)
             if frame is None:
                 continue
@@ -175,6 +244,8 @@ class VoiceLoop:
             follow_up = False
             while self._guarded(lambda: self.turn(follow_up)) and self.follow_up_s > 0:
                 follow_up = True
+                if self._due():
+                    break                         # an alarm or timer goes off first
             self.assistant.forget_guest()
             self.show(f"[waiting for '{wake_phrase}']")
 
@@ -255,7 +326,14 @@ class VoiceLoop:
             return True
         if self.conversation_commands is not None and self.conversation_commands.handle(heard, self, user):
             return True
-        # Mail and calendar are answered here, locally, before the router: never by Claude.
+        # Briefing, alarms, weather, mail and calendar are answered here, locally, before the
+        # router: never by Claude.
+        if self.briefing is not None and self.briefing.handle(heard, self, user):
+            return True
+        if self.alarm_commands is not None and self.alarm_commands.handle(heard, self, user):
+            return True
+        if self.weather_commands is not None and self.weather_commands.handle(heard, self, user):
+            return True
         if self.outlook_commands is not None and self.outlook_commands.handle(heard, self, user):
             return True
 
